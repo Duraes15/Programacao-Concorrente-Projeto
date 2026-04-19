@@ -1,0 +1,15 @@
+4/5 terminais (1 para o server os outros para os players)
+
+Terminal server:
+erl
+c(server).
+server:start(12345).
+
+Terminal players:
+javac GameClient.java //caso seja necessario recompilar
+java GameClient
+
+
+Para terminar os processos.
+Player - basta fechar a janela
+Server - Ctrl+C e depois "a" e enter

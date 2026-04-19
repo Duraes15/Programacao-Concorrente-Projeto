@@ -1,0 +1,15 @@
+TO DO:
+- "Desenhar" mapa
+- Mudar cores das bolas dos players (até pode ser consoante entram na match, por exemplo, o 1º fica a vermelho, o 2º a verde, etc.)
+- Quando todos os jogadores saem, terminar automaticamente a partida
+- Quando todos os jogadores saem, menos 1 deles, esse ganha automaticamente
+
+
+Pode dar problemas futuramente:
+- Se o jogador 1 se mexer, nas janelas dos outros players aparece com lag ou, por vezes, até salta etapas
+-- Pode dar problemas quando eu conseguir fazer com que todos os jogadores se queiram mexer ao mesmo tempo
+
+Done:
+- Quando um jogador está numa partida e sai do jogo, aparece no server a mensagem que ele saiu da Fila e não que saiu do jogo
+- Movimento com base em aceleração linear e aceleração angular
+- Não permitir que a mesma conta esteja logged in em mais do que uma window

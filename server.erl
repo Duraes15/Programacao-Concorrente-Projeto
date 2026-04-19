@@ -3,10 +3,13 @@
 
 start(Gate) ->
     try ets:new(utilizadores, [set, public, named_table])
-    catch _:_ -> ok 
-    end,
+    catch _:_ -> ok end,
 
-    try ets:new(rankings, [ordered_set, public, named_table, {keypos, 2}]) 
+    try ets:new(rankings, [ordered_set, public, named_table, {keypos, 2}])
+    catch _:_ -> ok end,
+
+    % NOVO — tabela de sessões ativas
+    try ets:new(sessoes_ativas, [set, public, named_table])
     catch _:_ -> ok end,
 
     {ok, ListenSocket} = gen_tcp:listen(Gate, [binary, {packet, 0}, {active, false}, {reuseaddr, true}]),
@@ -43,11 +46,12 @@ client_loop(Socket) ->
                 [] -> 
                     gen_tcp:send(Socket, <<"Erro: Nao enviaste nada.\n">>)
             end,
-            % Volta a pedir input
             gen_tcp:send(Socket, <<"\nEscreve o teu comando: ">>),
             client_loop(Socket);
 
-        {error, closed} -> 
+        % ANTES: {error, closed} -> ...
+        % AGORA: apanha qualquer erro de socket
+        {error, _Reason} ->
             io:format("Um cliente saiu.\n"),
             ok
     end.
@@ -70,13 +74,20 @@ process_command(Socket, "register", _) ->
 % LOGIN: Autenticação de jogador [cite: 15]
 process_command(Socket, "login", [User, Pass]) ->
     case ets:lookup(utilizadores, User) of
-        [{User, Pass}] -> 
-            gen_tcp:send(Socket, [<<"Sucesso: Ola ">>, list_to_binary(User), <<"!\n">>]),
-            % Entra no loop do menu e para o loop de autenticação
-            menu_loop(Socket, User); 
-        _ -> 
+        [{User, Pass}] ->
+            % NOVO — verifica se já há sessão ativa
+            case ets:lookup(sessoes_ativas, User) of
+                [] ->
+                    ets:insert(sessoes_ativas, {User, self()}),
+                    gen_tcp:send(Socket, [<<"Sucesso: Ola ">>, list_to_binary(User), <<"!\n">>]),
+                    menu_loop(Socket, User);
+                _ ->
+                    gen_tcp:send(Socket, <<"Erro: Esta conta ja esta em uso.\n">>)
+            end;
+        _ ->
             gen_tcp:send(Socket, <<"Erro: Credenciais invalidas.\n">>)
     end;
+
 process_command(Socket, "login", _) ->
     gen_tcp:send(Socket, <<"Instrucao: Usa o formato: LOGIN,teu_nome,tua_pass\n">>);
 
@@ -106,20 +117,24 @@ menu_loop(Socket, User) ->
             case Opcao of
                 "1" -> 
                     gen_tcp:send(Socket, <<"A entrar na fila de espera...\n">>),
-                    % Aqui chamaremos o Match Maker mais à frente
                     wait_loop(Socket, User); 
                 "2" -> 
-                    % Mostrar rankings 
                     show_rankings(Socket),
                     menu_loop(Socket, User);
                 "3" -> 
+                    ets:delete(sessoes_ativas, User),
                     gen_tcp:send(Socket, <<"Logout efetuado. Ate a proxima!\n">>),
-                    handle_client(Socket); % Volta para o ecrã inicial
+                    handle_client(Socket);
                 _ -> 
                     gen_tcp:send(Socket, <<"Opcao invalida.\n">>),
                     menu_loop(Socket, User)
             end;
-        {error, closed} -> ok
+        % ANTES: {error, closed} -> ok
+        % AGORA: apanha qualquer erro de socket
+        {error, _Reason} ->
+            ets:delete(sessoes_ativas, User),
+            io:format("~s desconectou do menu.~n", [User]),
+            ok
     end.
 
 show_rankings(Socket) ->
@@ -132,42 +147,56 @@ show_rankings(Socket) ->
     end,
     gen_tcp:send(Socket, <<"RANK_END\n">>).
 
-% Iniciamos o loop com a Fila vazia e 0 partidas a decorrer
 match_maker_loop(Fila, NumPartidasAtivas) ->
     receive
         {entrar_na_fila, Username, Pid} ->
             Ref = monitor(process, Pid),
-            NovaFila = Fila ++ [{Username, Pid, Ref}],
+            % Adicionamos o estado 'false' (não está pronto)
+            NovaFila = Fila ++ [{Username, Pid, Ref, false}],
+            io:format("DEBUG: ~p entrou na fila. Esperando 'Ready'...~n", [Username]),
+            match_maker_loop(NovaFila, NumPartidasAtivas);
+
+        {ready, Pid} ->
+            % Quando o Java envia "READY", atualizamos o estado na lista
+            NovaFila = lists:map(fun({U, P, R, S}) -> 
+                if P == Pid -> {U, P, R, true}; true -> {U, P, R, S} end 
+            end, Fila),
             
-            % LOG DE DEPURAÇÃO
-            io:format("DEBUG: ~p entrou na fila. Total na fila: ~p~n", [Username, length(NovaFila)]),
-            
-            if 
-                length(NovaFila) >= 3, NumPartidasAtivas < 4 ->
-                    % Escolhemos os primeiros 3 ou 4 jogadores (vamos levar 3 para testar mais fácil)
-                    {JogadoresParaJogo, RestoDaFila} = lists:split(3, NovaFila),
-                    
-                    % Criamos o processo da Partida
-                    % Passamos self() para a partida nos avisar quando terminar
-                    spawn(fun() -> inicializar_jogo(JogadoresParaJogo, self()) end),
-                    
-                    io:format("Partida lancada com 3 jogadores! Partidas ativas: ~p~n", [NumPartidasAtivas + 1]),
-                    match_maker_loop(RestoDaFila, NumPartidasAtivas + 1);
-                
-                true -> 
-                    match_maker_loop(NovaFila, NumPartidasAtivas)
-            end;
+            % Verificar se as condições de início foram atingidas
+            verificar_inicio_partida(NovaFila, NumPartidasAtivas);
 
         {'DOWN', Ref, process, _Pid, _Reason} ->
             NovaFila = lists:keydelete(Ref, 3, Fila),
-            io:format("Alguem saiu da fila. Jogadores restantes: ~p~n", [length(NovaFila)]),
             match_maker_loop(NovaFila, NumPartidasAtivas);
 
         {partida_terminou} ->
-            % Quando uma partida acaba, libertamos uma vaga para uma nova
-            io:format("Uma partida terminou. Vaga libertada.~n"),
             match_maker_loop(Fila, NumPartidasAtivas - 1)
     end.
+
+verificar_inicio_partida(Fila, NumPartidasAtivas) ->
+    Prontos = [P || P <- Fila, element(4, P) == true],
+    TotalNaFila = length(Fila),
+    NumProntos = length(Prontos),
+
+    % Lógica: 
+    % 1. Se chegarmos a 4 e todos derem Ready -> Começa com 4.
+    % 2. Se tivermos 3, todos derem Ready e não houver um 4º a entrar -> Começa com 3.
+    if 
+        NumProntos == 4, NumPartidasAtivas < 4 ->
+            iniciar_jogo_com_n(Fila, 4, NumPartidasAtivas);
+        NumProntos == 3, TotalNaFila == 3, NumPartidasAtivas < 4 ->
+            iniciar_jogo_com_n(Fila, 3, NumPartidasAtivas);
+        true -> 
+            match_maker_loop(Fila, NumPartidasAtivas)
+    end.
+
+iniciar_jogo_com_n(Fila, N, NumPartidasAtivas) ->
+    {Jogadores, Resto} = lists:split(N, Fila),
+    % Limpamos o campo 'ReadyStatus' para a função inicializar_jogo não se baralhar
+    JogadoresLimpos = [{U, P, R} || {U, P, R, _S} <- Jogadores],
+    spawn(fun() -> inicializar_jogo(JogadoresLimpos, self()) end),
+    io:format("Partida iniciada com ~p jogadores prontos!~n", [N]),
+    match_maker_loop(Resto, NumPartidasAtivas + 1).
 
 wait_loop(Socket, User) ->
     % 1. Entra na fila apenas UMA vez
@@ -181,20 +210,29 @@ wait_loop(Socket, User) ->
 
 wait_loop_atento(Socket, User) ->
     receive
+        % wait_loop_atento
         {tcp_closed, _Socket} ->
-            io:format("Jogador ~p desconectou-se.~n", [User]),
+            ets:delete(sessoes_ativas, User),
+            io:format("~s fechou a aplicação enquanto estava na fila.~n", [User]),
             exit(done);
-
-        {começar_partida, _Dados} ->
-            % Colocamos o socket em modo ativo para o game_loop receber as teclas
+        {tcp, Socket, Data} ->
+            case string:trim(binary_to_list(Data)) of
+                "READY" -> 
+                    match_maker ! {ready, self()},
+                    gen_tcp:send(Socket, <<"Estado: Estás pronto! A aguardar outros...\n">>),
+                    wait_loop_atento(Socket, User);
+                _ -> 
+                    wait_loop_atento(Socket, User)
+            end;
+        % Capturamos o MestrePid aqui (antigo _Dados)
+        {começar_partida, MestrePid} ->
             inet:setopts(Socket, [{active, true}]),
             gen_tcp:send(Socket, <<"A partida vai comecar!\n">>),
-            % Iniciamos o loop de jogo com posição inicial {100, 100}
-            game_loop(Socket, {100, 100})
+            % Chamamos a função com 3 argumentos para bater certo com a definição
+            game_loop(Socket, User, MestrePid)
 
         after 30000 -> 
-            show_rankings(Socket),
-            gen_tcp:send(Socket, <<"\nContinuas em fila de espera. Aguarda...\n">>),
+            gen_tcp:send(Socket, <<"Ainda estas na fila. A aguardar jogadores...\n">>),
             wait_loop_atento(Socket, User)
     end.
 
@@ -208,50 +246,111 @@ wait_loop_cont(Socket, User) ->
     end.
 
 inicializar_jogo(ListaJogadores, MatchMakerPid) ->
-    % 1. Avisar cada processo de jogador que o jogo começou
-    [Pid ! {começar_partida, []} || {_User, Pid, _Ref} <- ListaJogadores],
+    % {User, {X, Y}, {VelX, VelY}, Angulo, Massa, Pid}
+    EstadoInicial = [ {User, {100.0, 100.0 + (I*50.0)}, {0.0, 0.0}, 0.0, 50.0, Pid} 
+                      || {I, {User, Pid, _Ref}} <- lists:zip(lists:seq(1, length(ListaJogadores)), ListaJogadores) ],
+
+    [Pid ! {começar_partida, self()} || {_User, Pid, _Ref} <- ListaJogadores],
+    self() ! tick, 
+    partida_loop(EstadoInicial, MatchMakerPid).
+
+
+partida_loop(Estado, MatchMakerPid) ->
+    receive
+        {mover, User, Direcao} ->
+            % 1. Encontra o jogador na lista e aplica a aceleração/torque
+            NovoJogador = calcular_fisica(User, Direcao, Estado),
+            % 2. Substitui o jogador antigo pelo novo na lista global
+            NovoEstado = lists:keyreplace(User, 1, Estado, NovoJogador),
+            partida_loop(NovoEstado, MatchMakerPid);
+
+        tick ->
+            % 3. ATUALIZAÇÃO DA INÉRCIA: Move todos os jogadores baseando-se na velocidade atual
+            EstadoComInercia = aplicar_movimento_global(Estado),
+            
+            % 4. Broadcast do estado atualizado
+            broadcast_estado(EstadoComInercia),
+            
+            erlang:send_after(30, self(), tick),
+            partida_loop(EstadoComInercia, MatchMakerPid);
+
+        {fim_de_jogo} ->
+            MatchMakerPid ! {partida_terminou}
+    end.
+
+
+% Constantes da física
+-define(FORCA, 10.0).   % era 5.0 — muito fraco
+-define(TORQUE, 0.15).  % era 0.1
+-define(ATRITO, 0.995). % era 0.98 — travava em ~1 segundo
+
+calcular_fisica(User, Comando, Estado) ->
+    {User, {X, Y}, {VX, VY}, Angulo, Massa, Pid} = lists:keyfind(User, 1, Estado),
     
-    io:format("Sessao de jogo iniciada para 120 segundos.~n"),
+    case Comando of
+        "UP" -> 
+            % Acelera na direção do ângulo atual (F = m * a -> a = F/m)
+            AX = math:cos(Angulo) * (?FORCA / Massa),
+            AY = math:sin(Angulo) * (?FORCA / Massa),
+            {User, {X, Y}, {VX + AX, VY + AY}, Angulo, Massa, Pid};
+        "LEFT" -> 
+            {User, {X, Y}, {VX, VY}, Angulo - ?TORQUE, Massa, Pid};
+        "RIGHT" -> 
+            {User, {X, Y}, {VX, VY}, Angulo + ?TORQUE, Massa, Pid};
+        _ -> 
+            {User, {X, Y}, {VX, VY}, Angulo, Massa, Pid}
+    end.
+
+% Esta função corre para TODOS os jogadores a cada 30ms
+aplicar_movimento_global(Estado) ->
+    lists:map(fun({U, {X, Y}, {VX, VY}, Ang, M, Pid}) ->
+        NVX = VX * ?ATRITO,
+        NVY = VY * ?ATRITO,
+
+        NX = max(0.0, min(800.0, X + NVX)),
+        NY = max(0.0, min(600.0, Y + NVY)),
+
+        FVX = if NX =:= 0.0; NX =:= 800.0 -> 0.0; true -> NVX end,
+        FVY = if NY =:= 0.0; NY =:= 600.0 -> 0.0; true -> NVY end,
+
+        {U, {NX, NY}, {FVX, FVY}, Ang, M, Pid}
+    end, Estado).
+
+% Funções auxiliares simples para Erlang não se queixar
+cos(A) -> math:cos(A).
+sin(A) -> math:sin(A).
+% Envia o estado para o processo de cada jogador
+broadcast_estado(Estado) ->
+    StringEstado = "DATA" ++ lists:foldl(fun({U, {X, Y}, _, Ang, M, _Pid}, Acc) -> 
+        % Usamos float(X) para garantir que o io_lib não crasha se receber um inteiro
+        JogadorData = io_lib:format(",~s:~.2f:~.2f:~.2f:~.2f", 
+                                    [U, float(X), float(Y), float(Ang), float(M)]),
+        Acc ++ lists:flatten(JogadorData)
+    end, "", Estado),
     
-    % 2. Simular a duração da partida
-    timer:sleep(120000), 
-    
-    % 3. Avisar os jogadores que o jogo acabou
-    [Pid ! {fim_de_jogo} || {_User, Pid, _Ref} <- ListaJogadores],
-    
-    % 4. Avisar o Match Maker para libertar a vaga
-    MatchMakerPid ! {partida_terminou},
-    io:format("Sessao de jogo finalizada.~n").
+    [Pid ! {actualizar_mundo, StringEstado} || {_, _, _, _, _, Pid} <- Estado].
 
 % Exemplo de como o estado do jogador pode ser controlado
 % Estado = {X, Y}
-game_loop(Socket, {X, Y}) ->
-    % Enviamos a posição atual para o Java desenhar
-    % Usamos \n no final para o readLine() do Java funcionar
-    Msg = list_to_binary(io_lib:format("POS,~p,~p\n", [X, Y])),
-    gen_tcp:send(Socket, Msg),
-    
+game_loop(Socket, User, MestrePid) ->
     receive
+        % 1. Recebe tecla do Java e avisa o Mestre
         {tcp, Socket, Data} ->
-            Comando = string:trim(binary_to_list(Data)),
-            % Lógica de movimento simples
-            NovaPos = case Comando of
-                "UP"    -> {X, Y - 10};
-                "DOWN"  -> {X, Y + 10};
-                "RIGHT" -> {X + 10, Y};
-                "LEFT"  -> {X - 10, Y};
-                _       -> {X, Y}
-            end,
-            game_loop(Socket, NovaPos);
+            Tecla = string:trim(binary_to_list(Data)),
+            MestrePid ! {mover, User, Tecla},
+            game_loop(Socket, User, MestrePid);
+
+        % 2. Recebe o estado global do Mestre e envia para o Java
+        {actualizar_mundo, StringEstado} ->
+            gen_tcp:send(Socket, list_to_binary(StringEstado ++ "\n")),
+            game_loop(Socket, User, MestrePid);
 
         {fim_de_jogo} ->
-            gen_tcp:send(Socket, <<"O tempo acabou! A voltar ao menu...\n">>),
-            % Opcional: Voltar ao menu_loop se quiseres continuar a jogar
-            ok; 
-            
-        {tcp_closed, _Socket} -> 
+            gen_tcp:send(Socket, <<"FIM\n">>),
+            ok;
+        % game_loop
+        {tcp_closed, _Socket} ->
+            ets:delete(sessoes_ativas, User),  % NOVO
+            io:format("DESISTÊNCIA: ~s abandonou a partida em curso!~n", [User]),
             exit(done)
-
-    after 40 -> % Aproximadamente 25 FPS para um movimento fluido
-        game_loop(Socket, {X, Y})
     end.

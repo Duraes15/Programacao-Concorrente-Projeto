@@ -3,6 +3,15 @@ import java.awt.*;
 import java.awt.event.*;
 import java.io.*;
 import java.net.*;
+import java.util.HashMap; // Adiciona este import
+import java.util.HashSet;
+import java.util.Map;     // Adiciona este import
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap; // Adiciona este import
+import java.util.HashSet;
+import java.util.Set;
+import javax.swing.Timer;
+
 
 public class GameClient extends JFrame {
     private Socket socket;
@@ -16,6 +25,10 @@ public class GameClient extends JFrame {
 
     private StringBuilder rankBuffer = new StringBuilder();
     private boolean collectingRankings = false;
+
+    private Map<String, PlayerData> playerPositions = new ConcurrentHashMap<>();
+
+    private String myUsername; 
 
     public GameClient() {
         initGUI();
@@ -51,28 +64,43 @@ public class GameClient extends JFrame {
     }
 
     private void processarMensagem(String msg) {
+        // 1. Lógica de Rankings (Captura de buffer)
         if (msg.equals("RANK_START")) {
             collectingRankings = true;
-            rankBuffer.setLength(0); // Limpa o buffer
+            rankBuffer.setLength(0);
             return;
         }
-
         if (msg.equals("RANK_END")) {
             collectingRankings = false;
             SwingUtilities.invokeLater(() -> mudarParaRanking(rankBuffer.toString()));
             return;
         }
-
         if (collectingRankings) {
             rankBuffer.append(msg).append("\n");
             return;
         }
 
-        // ... resto das tuas lógicas (Login Sucesso, POS, etc) ...
         if (msg.contains("Sucesso: Ola")) {
+            // Extrai o nome da mensagem "Sucesso: Ola Nome!"
+            this.myUsername = msg.replace("Sucesso: Ola ", "").replace("!", "").trim();
             SwingUtilities.invokeLater(() -> mudarParaMenu());
-        } else if (msg.contains("A partida vai comecar")) {
+        } 
+        else if (msg.contains("A partida vai comecar")) {
             SwingUtilities.invokeLater(() -> mudarParaJogo());
+        }
+        // 3. Atualização do Mundo (Onde a magia acontece)
+        else if (msg.startsWith("DATA") && gamePanel != null) {
+            gamePanel.updateWorld(msg);
+        }
+        // 4. Mensagens informativas (Fila de espera, erros, etc)
+        else {
+            SwingUtilities.invokeLater(() -> {
+                if (menuPanel != null && menuPanel.isShowing()) {
+                    menuPanel.setInfo(msg);
+                } else if (loginPanel != null && loginPanel.isShowing()) {
+                    loginPanel.setStatus(msg);
+                }
+            });
         }
     }
 
@@ -140,32 +168,38 @@ public class GameClient extends JFrame {
         public void setStatus(String msg) { statusLabel.setText(msg); }
     }
 
-    // --- SUB-ECRÃ DE MENU PRINCIPAL (Atualizado com Feedback) ---
-    // --- SUB-ECRÃ DE MENU PRINCIPAL (Corrigido) ---
-    class MenuPanel extends JPanel {
+class MenuPanel extends JPanel {
         JButton playBtn = new JButton("Procurar Partida");
+        JButton readyBtn = new JButton("ESTOU PRONTO");
         JButton rankBtn = new JButton("Ver Rankings");
         JButton logoutBtn = new JButton("Sair/Logout");
         JLabel infoLabel = new JLabel("Escolhe uma opção para continuar.", SwingConstants.CENTER);
 
         public MenuPanel() {
-            setLayout(new GridLayout(4, 1, 10, 10));
-            // AQUI ESTAVA O ERRO: createEmptyBorder em vez de Padding
+            setLayout(new GridLayout(5, 1, 10, 10));
             setBorder(BorderFactory.createEmptyBorder(20, 50, 20, 50));
-
             infoLabel.setFont(new Font("Arial", Font.BOLD, 14));
-            
+
+            readyBtn.setVisible(false);
+            readyBtn.setBackground(Color.ORANGE);
+
             add(infoLabel);
             add(playBtn);
+            add(readyBtn);
             add(rankBtn);
             add(logoutBtn);
 
             playBtn.addActionListener(e -> {
                 out.println("1");
-                infoLabel.setText("<html><body style='text-align:center; color:blue;'>" +
-                                 "Estás na fila de espera...<br>" +
-                                 "A aguardar por mais 2 jogadores.</body></html>");
                 playBtn.setEnabled(false);
+                readyBtn.setVisible(true);
+                infoLabel.setText("Estás na fila. Clica em 'Estou Pronto' para jogar.");
+            });
+
+            readyBtn.addActionListener(e -> {
+                out.println("READY");
+                readyBtn.setEnabled(false);
+                readyBtn.setText("AGUARDANDO...");
             });
 
             rankBtn.addActionListener(e -> {
@@ -187,44 +221,108 @@ public class GameClient extends JFrame {
         }
     }
 
+    // Dentro da classe GameClient, mas fora de outros métodos
+    class PlayerData {
+        double x, y, angulo, massa;
+
+        PlayerData(double x, double y, double angulo, double massa) {
+            this.x = x;
+            this.y = y;
+            this.angulo = angulo;
+            this.massa = massa;
+        }
+    }
+
     class GamePanel extends JPanel {
-        int x = 50, y = 50;
+        private final Set<Integer> keysPressed = new HashSet<>();
+        private Timer inputTimer;
 
         public GamePanel() {
-            // Importante: permite que o painel receba foco para detetar teclas
             setFocusable(true);
             requestFocusInWindow();
 
             addKeyListener(new KeyAdapter() {
                 @Override
                 public void keyPressed(KeyEvent e) {
-                    int code = e.getKeyCode();
-                    
-                    // Enviamos o comando para o Erlang conforme a tecla
-                    if (code == KeyEvent.VK_UP)    out.println("UP");
-                    if (code == KeyEvent.VK_DOWN)  out.println("DOWN");
-                    if (code == KeyEvent.VK_RIGHT) out.println("RIGHT");
-                    if (code == KeyEvent.VK_LEFT)  out.println("LEFT"); // Adicionei esquerda por cortesia!
+                    keysPressed.add(e.getKeyCode());
+                }
+                @Override
+                public void keyReleased(KeyEvent e) {
+                    keysPressed.remove(e.getKeyCode());
                 }
             });
+
+            // Envia input ao servidor ~33x por segundo
+            inputTimer = new Timer(30, e -> {
+                if (keysPressed.contains(KeyEvent.VK_UP))    out.println("UP");
+                if (keysPressed.contains(KeyEvent.VK_DOWN))  out.println("DOWN");
+                if (keysPressed.contains(KeyEvent.VK_LEFT))  out.println("LEFT");
+                if (keysPressed.contains(KeyEvent.VK_RIGHT)) out.println("RIGHT");
+            });
+            inputTimer.start();
         }
 
-        public void updatePos(String msg) {
+        // Chama isto quando o jogo terminar para não ficar a enviar mensagens
+        public void stopInput() {
+            if (inputTimer != null) inputTimer.stop();
+        }
+
+        public void updateWorld(String msg) {
             try {
-                String[] p = msg.split(",");
-                x = Integer.parseInt(p[1]);
-                y = Integer.parseInt(p[2]);
+                String[] parts = msg.split(",");
+                // O parts[0] é "DATA"
+                for (int i = 1; i < parts.length; i++) {
+                    String[] data = parts[i].split(":");
+                    String user = data[0];
+                    double x = Double.parseDouble(data[1]);
+                    double y = Double.parseDouble(data[2]);
+                    double ang = Double.parseDouble(data[3]);
+                    double m = Double.parseDouble(data[4]);
+
+                    // Guardamos o objeto completo no mapa
+                    playerPositions.put(user, new PlayerData(x, y, ang, m));
+                }
                 repaint();
-            } catch (Exception e) {}
+            } catch (Exception e) {
+                System.out.println("Erro no parser: " + e.getMessage());
+            }
         }
 
         @Override
         protected void paintComponent(Graphics g) {
             super.paintComponent(g);
-            g.setColor(Color.BLACK);
-            g.fillRect(0, 0, getWidth(), getHeight());
-            g.setColor(Color.GREEN);
-            g.fillOval(x, y, 30, 30);
+            Graphics2D g2 = (Graphics2D) g;
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        
+            playerPositions.forEach((user, p) -> {
+                int radius = (int) Math.sqrt(p.massa * 20); 
+                int ix = (int) p.x;
+                int iy = (int) p.y;
+            
+                // --- AQUI ---
+                // Definimos a espessura da linha para 3 píxeis
+                g2.setStroke(new BasicStroke(3)); 
+            
+                // 1. Cor da Borda
+                if (user.equals(myUsername)) g2.setColor(Color.BLUE);
+                else g2.setColor(Color.RED);
+
+                // Desenha a borda (agora com 3px de espessura)
+                g2.drawOval(ix - radius, iy - radius, radius * 2, radius * 2);
+            
+                // 2. Interior Preto (Avatar)
+                g2.setColor(Color.BLACK);
+                g2.fillOval(ix - radius, iy - radius, radius * 2, radius * 2);
+            
+                // 3. Linha de Direção (Branca) - Também será desenhada com 3px!
+                g2.setColor(Color.WHITE);
+                int targetX = (int) (ix + Math.cos(p.angulo) * radius);
+                int targetY = (int) (iy + Math.sin(p.angulo) * radius);
+                g2.drawLine(ix, iy, targetX, targetY);
+            
+                // Nome por cima
+                g2.drawString(user, ix - radius, iy - radius - 5);
+            });
         }
     }
 
