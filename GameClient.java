@@ -10,7 +10,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap; // Adiciona este import
 import java.util.HashSet;
 import java.util.Set;
-import javax.swing.Timer;
 
 
 public class GameClient extends JFrame {
@@ -82,7 +81,11 @@ public class GameClient extends JFrame {
 
         if (msg.contains("Sucesso: Ola")) {
             // Extrai o nome da mensagem "Sucesso: Ola Nome!"
-            this.myUsername = msg.replace("Sucesso: Ola ", "").replace("!", "").trim();
+            // this.myUsername = msg.replace("Sucesso: Ola ", "").replace("!", "").trim();
+            // Comentei a linha acima, pois a coloquei de maneira diferente no método enviar,
+            // guardei o username logo na função enviar, pois estava dando erro na hora de identificar
+            // os jogadores com a borda azul ou vermelha. Se concordarem com a minha abordagem, acho que 
+            // a linha de código acima não é mais necessária, pois estava causando problemas.
             SwingUtilities.invokeLater(() -> mudarParaMenu());
         } 
         else if (msg.contains("A partida vai comecar")) {
@@ -162,6 +165,11 @@ public class GameClient extends JFrame {
         }
 
         private void enviar(String cmd) {
+            // Se o comando for login ou register, guardamos logo o username limpo
+            if (cmd.equals("login") || cmd.equals("register")) {
+                GameClient.this.myUsername = userField.getText().trim();
+            }
+            
             out.println(cmd + "," + userField.getText() + "," + new String(passField.getPassword()));
         }
 
@@ -273,7 +281,7 @@ class MenuPanel extends JPanel {
                 // O parts[0] é "DATA"
                 for (int i = 1; i < parts.length; i++) {
                     String[] data = parts[i].split(":");
-                    String user = data[0];
+                    String user = data[0].trim(); //// Uso do trim para evitar problemas de nomes que estejam com espaços no fim
                     double x = Double.parseDouble(data[1]);
                     double y = Double.parseDouble(data[2]);
                     double ang = Double.parseDouble(data[3]);
@@ -294,6 +302,21 @@ class MenuPanel extends JPanel {
             Graphics2D g2 = (Graphics2D) g;
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
         
+            // 1. Desenhar o mapa (temos um problema: acredito que precisamos
+            // garantir que, quando um jogador fica com o ecrã do jogo igual ao ecrã
+            // do portátil, o jogador consiga explorar todo o espaço. Da maneira que está definida no
+            // server, o espaço para o jogador explorar é bem menor do que o espaço do ecrã dos nossos
+            // portáteis.)
+            
+            // Fundo do mapa (vazio)
+            g2.setColor(Color.WHITE); // É dito para usarmos a cor branca no enunciado
+            g2.fillRect(0, 0, getWidth(), getHeight());
+
+            // Limites do espaço (borda nos 4 lados)
+            g2.setColor(Color.DARK_GRAY);
+            g2.setStroke(new BasicStroke(5)); // Espessura da parede
+            g2.drawRect(0, 0, getWidth(), getHeight());
+
             playerPositions.forEach((user, p) -> {
                 int radius = (int) Math.sqrt(p.massa * 20); 
                 int ix = (int) p.x;
@@ -304,8 +327,11 @@ class MenuPanel extends JPanel {
                 g2.setStroke(new BasicStroke(3)); 
             
                 // 1. Cor da Borda
-                if (user.equals(myUsername)) g2.setColor(Color.BLUE);
-                else g2.setColor(Color.RED);
+                // Uso do trim para evitar problemas de nomes que estejam com espaços no fim
+                if (myUsername != null && user.trim().equals(myUsername.trim()))
+                    g2.setColor(Color.BLUE);
+                else 
+                    g2.setColor(Color.RED);
 
                 // Desenha a borda (agora com 3px de espessura)
                 g2.drawOval(ix - radius, iy - radius, radius * 2, radius * 2);
