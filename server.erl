@@ -247,13 +247,16 @@ wait_loop_cont(Socket, User) ->
 
 inicializar_jogo(ListaJogadores, MatchMakerPid) ->
     % {User, {X, Y}, {VelX, VelY}, Angulo, Massa, Pid}
-    EstadoInicial = [ {User, {100.0, 100.0 + (I*50.0)}, {0.0, 0.0}, 0.0, 50.0, Pid} 
-                      || {I, {User, Pid, _Ref}} <- lists:zip(lists:seq(1, length(ListaJogadores)), ListaJogadores) ],
+    EstadoInicial = [
+        begin
+            Ref = monitor (process, Pid),
+            {User, {100.0, 100.0 + (I*50.0)}, {0.0, 0.0}, 0.0, 50.0, Pid, Ref}
+        end
+        || {I, {User, Pid, _Ref}} <- lists:zip(lists:seq(1, length(ListaJogadores)), ListaJogadores) ],
 
     [Pid ! {começar_partida, self()} || {_User, Pid, _Ref} <- ListaJogadores],
     self() ! tick, 
     partida_loop(EstadoInicial, MatchMakerPid).
-
 
 partida_loop(Estado, MatchMakerPid) ->
     receive
@@ -274,8 +277,24 @@ partida_loop(Estado, MatchMakerPid) ->
             erlang:send_after(30, self(), tick),
             partida_loop(EstadoComInercia, MatchMakerPid);
 
+        {'DOWN', Ref, process, _Pid, _Reason} ->
+            NovoEstado = lists:filter(fun({_User, _Pos, _Vel, _Ang, _M, _Pid, R}) -> R =/= Ref end, Estado),
+            case(length(NovoEstado)) of
+                1 -> 
+                    [Winner] = NovoEstado, 
+                    {UserWinner, _, _, _, _, _, _} = Winner,
+                    io:format("Vencedor: ~p~n", [UserWinner]),
+
+                    broadcast_fim(NovoEstado),
+
+                    MatchMakerPid ! {partida_terminou};
+                _ ->
+                    partida_loop(NovoEstado, MatchMakerPid)
+            end;
+
         {fim_de_jogo} ->
             MatchMakerPid ! {partida_terminou}
+        
     end.
 
 
@@ -285,25 +304,25 @@ partida_loop(Estado, MatchMakerPid) ->
 -define(ATRITO, 0.995). % era 0.98 — travava em ~1 segundo
 
 calcular_fisica(User, Comando, Estado) ->
-    {User, {X, Y}, {VX, VY}, Angulo, Massa, Pid} = lists:keyfind(User, 1, Estado),
+    {User, {X, Y}, {VX, VY}, Angulo, Massa, Pid, Ref} = lists:keyfind(User, 1, Estado),
     
     case Comando of
         "UP" -> 
             % Acelera na direção do ângulo atual (F = m * a -> a = F/m)
             AX = math:cos(Angulo) * (?FORCA / Massa),
             AY = math:sin(Angulo) * (?FORCA / Massa),
-            {User, {X, Y}, {VX + AX, VY + AY}, Angulo, Massa, Pid};
+            {User, {X, Y}, {VX + AX, VY + AY}, Angulo, Massa, Pid, Ref};
         "LEFT" -> 
-            {User, {X, Y}, {VX, VY}, Angulo - ?TORQUE, Massa, Pid};
+            {User, {X, Y}, {VX, VY}, Angulo - ?TORQUE, Massa, Pid, Ref};
         "RIGHT" -> 
-            {User, {X, Y}, {VX, VY}, Angulo + ?TORQUE, Massa, Pid};
+            {User, {X, Y}, {VX, VY}, Angulo + ?TORQUE, Massa, Pid, Ref};
         _ -> 
-            {User, {X, Y}, {VX, VY}, Angulo, Massa, Pid}
+            {User, {X, Y}, {VX, VY}, Angulo, Massa, Pid, Ref}
     end.
 
 % Esta função corre para TODOS os jogadores a cada 30ms
 aplicar_movimento_global(Estado) ->
-    lists:map(fun({U, {X, Y}, {VX, VY}, Ang, M, Pid}) ->
+    lists:map(fun({U, {X, Y}, {VX, VY}, Ang, M, Pid, Ref}) ->
         NVX = VX * ?ATRITO,
         NVY = VY * ?ATRITO,
 
@@ -313,7 +332,7 @@ aplicar_movimento_global(Estado) ->
         FVX = if NX =:= 0.0; NX =:= 800.0 -> 0.0; true -> NVX end,
         FVY = if NY =:= 0.0; NY =:= 600.0 -> 0.0; true -> NVY end,
 
-        {U, {NX, NY}, {FVX, FVY}, Ang, M, Pid}
+        {U, {NX, NY}, {FVX, FVY}, Ang, M, Pid, Ref}
     end, Estado).
 
 % Funções auxiliares simples para Erlang não se queixar
@@ -321,14 +340,17 @@ cos(A) -> math:cos(A).
 sin(A) -> math:sin(A).
 % Envia o estado para o processo de cada jogador
 broadcast_estado(Estado) ->
-    StringEstado = "DATA" ++ lists:foldl(fun({U, {X, Y}, _, Ang, M, _Pid}, Acc) -> 
+    StringEstado = "DATA" ++ lists:foldl(fun({U, {X, Y}, _, Ang, M, _Pid, _}, Acc) -> 
         % Usamos float(X) para garantir que o io_lib não crasha se receber um inteiro
         JogadorData = io_lib:format(",~s:~.2f:~.2f:~.2f:~.2f", 
                                     [U, float(X), float(Y), float(Ang), float(M)]),
         Acc ++ lists:flatten(JogadorData)
     end, "", Estado),
     
-    [Pid ! {actualizar_mundo, StringEstado} || {_, _, _, _, _, Pid} <- Estado].
+    [Pid ! {actualizar_mundo, StringEstado} || {_, _, _, _, _, Pid, _} <- Estado].
+
+broadcast_fim(Estado) ->
+    [Pid ! {fim_de_jogo} || {_, _, _, _, _, Pid, _} <- Estado].
 
 % Exemplo de como o estado do jogador pode ser controlado
 % Estado = {X, Y}
