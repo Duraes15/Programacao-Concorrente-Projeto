@@ -95,6 +95,9 @@ public class GameClient extends JFrame {
         else if (msg.startsWith("DATA") && gamePanel != null) {
             gamePanel.updateWorld(msg);
         }
+        else if (msg.contains("FIM")){
+            SwingUtilities.invokeLater(() -> mudarParaMenu());
+        }
         // 4. Mensagens informativas (Fila de espera, erros, etc)
         else {
             SwingUtilities.invokeLater(() -> {
