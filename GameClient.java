@@ -265,10 +265,10 @@ class MenuPanel extends JPanel {
 
             // Envia input ao servidor ~33x por segundo
             inputTimer = new Timer(30, e -> {
-                if (keysPressed.contains(KeyEvent.VK_UP))    out.println("UP");
-                if (keysPressed.contains(KeyEvent.VK_DOWN))  out.println("DOWN");
-                if (keysPressed.contains(KeyEvent.VK_LEFT))  out.println("LEFT");
-                if (keysPressed.contains(KeyEvent.VK_RIGHT)) out.println("RIGHT");
+                if (keysPressed.contains(KeyEvent.VK_UP))      out.println("UP");
+                if (keysPressed.contains(KeyEvent.VK_LEFT))    out.println("LEFT");
+                if (keysPressed.contains(KeyEvent.VK_RIGHT))   out.println("RIGHT");
+                if (keysPressed.contains(KeyEvent.VK_ESCAPE))  out.println("ESC");
             });
             inputTimer.start();
         }

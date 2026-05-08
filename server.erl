@@ -260,12 +260,23 @@ inicializar_jogo(ListaJogadores, MatchMakerPid) ->
 
 partida_loop(Estado, MatchMakerPid) ->
     receive
-        {mover, User, Direcao} ->
-            % 1. Encontra o jogador na lista e aplica a aceleração/torque
-            NovoJogador = calcular_fisica(User, Direcao, Estado),
-            % 2. Substitui o jogador antigo pelo novo na lista global
-            NovoEstado = lists:keyreplace(User, 1, Estado, NovoJogador),
-            partida_loop(NovoEstado, MatchMakerPid);
+        {mover, User, Tecla} ->
+            case Tecla of 
+                "ESC" ->
+                    EstadoSaiu = lists:filter(fun({U, _Pos, _Vel, _Ang, _M, _Pid, _R}) -> User == U end, Estado),
+                    NovoEstado = lists:filter(fun({U, _Pos, _Vel, _Ang, _M, _Pid, _R}) -> User =/= U end, Estado),
+
+                    broadcast_saiu(EstadoSaiu),
+
+                    check_winner(NovoEstado, MatchMakerPid);
+                    
+                _ ->
+                    % 1. Encontra o jogador na lista e aplica a aceleração/torque
+                    NovoJogador = calcular_fisica(User, Tecla, Estado),
+                    % 2. Substitui o jogador antigo pelo novo na lista global
+                    NovoEstado = lists:keyreplace(User, 1, Estado, NovoJogador),
+                    partida_loop(NovoEstado, MatchMakerPid)
+                end;
 
         tick ->
             % 3. ATUALIZAÇÃO DA INÉRCIA: Move todos os jogadores baseando-se na velocidade atual
@@ -279,18 +290,7 @@ partida_loop(Estado, MatchMakerPid) ->
 
         {'DOWN', Ref, process, _Pid, _Reason} ->
             NovoEstado = lists:filter(fun({_User, _Pos, _Vel, _Ang, _M, _Pid, R}) -> R =/= Ref end, Estado),
-            case(length(NovoEstado)) of
-                1 -> 
-                    [Winner] = NovoEstado, 
-                    {UserWinner, _, _, _, _, _, _} = Winner,
-                    io:format("Vencedor: ~p~n", [UserWinner]),
-
-                    broadcast_fim(NovoEstado),
-
-                    MatchMakerPid ! {partida_terminou};
-                _ ->
-                    partida_loop(NovoEstado, MatchMakerPid)
-            end;
+            check_winner(NovoEstado, MatchMakerPid);
 
         {fim_de_jogo} ->
             MatchMakerPid ! {partida_terminou}
@@ -302,6 +302,20 @@ partida_loop(Estado, MatchMakerPid) ->
 -define(FORCA, 10.0).   % era 5.0 — muito fraco
 -define(TORQUE, 0.15).  % era 0.1
 -define(ATRITO, 0.995). % era 0.98 — travava em ~1 segundo
+
+check_winner(Estado, MatchMakerPid) ->
+    case(length(Estado)) of
+        1 -> 
+            [Winner] = Estado, 
+            {UserWinner, _, _, _, _, _, _} = Winner,
+            io:format("Vencedor: ~p~n", [UserWinner]),
+
+            broadcast_fim(Estado),
+
+            MatchMakerPid ! {partida_terminou};
+        _ ->
+            partida_loop(Estado, MatchMakerPid)
+    end.
 
 calcular_fisica(User, Comando, Estado) ->
     {User, {X, Y}, {VX, VY}, Angulo, Massa, Pid, Ref} = lists:keyfind(User, 1, Estado),
@@ -352,6 +366,8 @@ broadcast_estado(Estado) ->
 broadcast_fim(Estado) ->
     [Pid ! {fim_de_jogo} || {_, _, _, _, _, Pid, _} <- Estado].
 
+broadcast_saiu(Estado) ->
+    [Pid ! {saiu} || {_, _, _, _, _, Pid, _} <- Estado].
 % Exemplo de como o estado do jogador pode ser controlado
 % Estado = {X, Y}
 game_loop(Socket, User, MestrePid) ->
@@ -370,6 +386,11 @@ game_loop(Socket, User, MestrePid) ->
         {fim_de_jogo} ->
             gen_tcp:send(Socket, <<"FIM\n">>),
             ok;
+        {saiu} ->
+            ets:delete(sessoes_ativas, User),
+            gen_tcp:send(Socket, <<"FIM\n">>),
+            io:format("DESISTÊNCIA: ~s abandonou a partida em curso!~n", [User]),
+            exit(done);
         % game_loop
         {tcp_closed, _Socket} ->
             ets:delete(sessoes_ativas, User),  % NOVO
