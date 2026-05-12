@@ -153,47 +153,96 @@ gerar_objetos(N) ->
     [{obj, Id, {X, Y}, Tipo, Tamanho} | gerar_objetos(N-1)].
 
 processar_colisoes(Jogadores, Objetos) ->
-    % Separa os venenosos (Tipo 2) dos comestíveis
-    {Venenosos, Outros} = lists:partition(fun({obj, _, _, Tipo, _}) -> Tipo == 2 end, Objetos),
+    {Venenosos, Comestiveis} = lists:partition(fun({obj, _, _, Tipo, _}) -> Tipo == 2 end, Objetos),
     
-    % Faz a colisão de cada jogador
-    {NovosJogadores, VenenosRestantes} = lists:foldl(fun(Jogador, {AccJ, AccV}) ->
+    {JogadoresAposVenenos, VenenosRestantes} = lists:foldl(fun(Jogador, {AccJ, AccV}) ->
         {NovoJ, NovosV} = verificar_colisao_veneno(Jogador, AccV),
         {[NovoJ | AccJ], NovosV}
     end, {[], Venenosos}, Jogadores),
     
-    % Gera novos venenos para substituir os que desapareceram
-    NumDesaparecidos = length(Venenosos) - length(VenenosRestantes),
-    NovosVenenos = gerar_objetos_venenosos(NumDesaparecidos),
-    
-    % Devolve o estado atualizado
-    {lists:reverse(NovosJogadores), Outros ++ VenenosRestantes ++ NovosVenenos}.
+    JogadoresPasso1 = lists:reverse(JogadoresAposVenenos),
 
-verificar_colisao_veneno(Jogador = {U, PosJ, V, Ang, M, Pid, Ref}, Venenosos) ->
-    RaioP = math:sqrt(M * 20),
+    {JogadoresFinais, ComestiveisRestantes} = lists:foldl(fun(Jogador, {AccJ, AccC}) ->
+        {NovoJ, NovosC} = verificar_colisao_comestivel(Jogador, AccC),
+        {[NovoJ | AccJ], NovosC}
+    end, {[], Comestiveis}, JogadoresPasso1),
     
-    lists:foldl(fun(Obj = {obj, IdO, PosO, _, TamO}, {J = {U1, P1, V1, A1, M1, Pid1, Ref1}, AccV}) ->
+    JogadoresPasso2 = lists:reverse(JogadoresFinais),
+    
+    NumVenenosMortos = length(Venenosos) - length(VenenosRestantes),
+    NumComestiveMortos = length(Comestiveis) - length(ComestiveisRestantes),
+    
+    NovosVenenos = gerar_objetos_tipo(NumVenenosMortos, 2),
+    NovosComestiveis = gerar_objetos_tipo(NumComestiveMortos, 1),
+    
+    {JogadoresPasso2, VenenosRestantes ++ ComestiveisRestantes ++ NovosVenenos ++ NovosComestiveis}.
+
+verificar_colisao_veneno(Jogador = {_, PosJ, _, _, M, _, _}, Venenosos) ->
+    RaioP = math:sqrt(M * 20),
+    lists:foldl(fun({obj, IdO, PosO, _, TamO}, {J = {U1, P1, V1, A1, M1, Pid1, Ref1}, AccV}) ->
         Dist = distancia(PosJ, PosO),
         if Dist < (RaioP + TamO) ->
-            % COLIDIU! Perde a massa do objeto [cite: 30]
             NovaMassa = max(?MIN_MASSA, M1 - TamO),
             io:format(">> COLISAO: ~s bateu num veneno! Massa: ~.2f -> ~.2f~n", [U1, M1, NovaMassa]),
-            
             NovoJ = {U1, P1, V1, A1, NovaMassa, Pid1, Ref1},
-            NovoV = lists:keydelete(IdO, 2, AccV), % Remove o objeto pelo ID
+            NovoV = lists:keydelete(IdO, 2, AccV),
             {NovoJ, NovoV};
         true ->
-            {J, AccV} % Não colidiu
+            {J, AccV}
         end
     end, {Jogador, Venenosos}, Venenosos).
 
-% Função exclusiva para gerar venenos quando os antigos forem comidos
-gerar_objetos_venenosos(0) -> [];
-gerar_objetos_venenosos(N) ->
+verificar_colisao_comestivel(Jogador = {_, PosJ, _, _, M, _, _}, Comestiveis) ->
+    RaioP = math:sqrt(M * 20),
+    lists:foldl(fun({obj, IdO, PosO, _, TamO}, {J = {U1, P1, V1, A1, M1, Pid1, Ref1}, AccC}) ->
+        Dist = distancia(PosJ, PosO),
+        if (RaioP > TamO) andalso ((Dist + TamO) =< RaioP) ->
+            NovaMassa = M1 + TamO,
+            io:format(">> CAPTURA: ~s comeu um verde! Massa: ~.2f -> ~.2f~n", [U1, M1, NovaMassa]),
+            NovoJ = {U1, P1, V1, A1, NovaMassa, Pid1, Ref1},
+            NovoC = lists:keydelete(IdO, 2, AccC),
+            {NovoJ, NovoC};
+        true ->
+            {J, AccC}
+        end
+    end, {Jogador, Comestiveis}, Comestiveis).
+
+gerar_objetos_tipo(0, _Tipo) -> [];
+gerar_objetos_tipo(N, Tipo) ->
     Id = erlang:unique_integer([positive]),
     X = rand:uniform(1920) * 1.0,
     Y = rand:uniform(1080) * 1.0,
-    [{obj, Id, {X, Y}, 2, 10.0 + rand:uniform(20)} | gerar_objetos_venenosos(N-1)].
+    [{obj, Id, {X, Y}, Tipo, 10.0 + rand:uniform(20)} | gerar_objetos_tipo(N-1, Tipo)].
+
+processar_capturas_jogadores(Jogadores) ->
+    Sorted = lists:reverse(lists:keysort(5, Jogadores)),
+    aplicar_capturas(Sorted, []).
+
+aplicar_capturas([], Processados) -> Processados;
+aplicar_capturas([Predador | Resto], Processados) ->
+    {U1, Pos1, V1, A1, M1, Pid1, Ref1} = Predador,
+    Raio1 = math:sqrt(M1 * 20),
+    {NovoResto, GanhoMassa} = engolir_presas(Predador, Raio1, Resto, 0),
+    NovoPredador = {U1, Pos1, V1, A1, M1 + GanhoMassa, Pid1, Ref1},
+    aplicar_capturas(NovoResto, [NovoPredador | Processados]).
+
+engolir_presas(_Predador, _Raio1, [], GanhoMassa) -> {[], GanhoMassa};
+engolir_presas(Predador = {U1, Pos1, _, _, _, _, _}, Raio1, [Presa | Resto], GanhoMassa) ->
+    {U2, Pos2, _V2, A2, M2, Pid2, Ref2} = Presa,
+    Dist = distancia(Pos1, Pos2),
+    Raio2 = math:sqrt(M2 * 20),
+    if (Raio1 > Raio2) andalso ((Dist + Raio2) =< Raio1) ->
+        MassaRoubada = M2 / 4.0,
+        NovaMassaPresa = max(?MIN_MASSA, M2 - MassaRoubada),
+        NovaPos2 = {rand:uniform(1920) * 1.0, rand:uniform(1080) * 1.0},
+        NovaPresa = {U2, NovaPos2, {0.0, 0.0}, A2, NovaMassaPresa, Pid2, Ref2},
+        io:format(">> PVP: ~s engoliu ~s!~n", [U1, U2]),
+        {FinalResto, FinalGanho} = engolir_presas(Predador, Raio1, Resto, GanhoMassa + MassaRoubada),
+        {[NovaPresa | FinalResto], FinalGanho};
+    true ->
+        {FinalResto, FinalGanho} = engolir_presas(Predador, Raio1, Resto, GanhoMassa),
+        {[Presa | FinalResto], FinalGanho}
+    end.
 
 show_rankings(Socket) ->
     Lista = ets:tab2list(rankings),
@@ -294,14 +343,15 @@ wait_loop_atento(Socket, User) ->
             wait_loop_atento(Socket, User)
     end.
 
+% Comentei a função abaixo para não dar warnings
 % Função auxiliar para continuar a espera sem reenviar mensagem ao match_maker
-wait_loop_cont(Socket, User) ->
-    receive
-        {começar_partida, _} -> ok % Lógica de jogo
-    after 30000 -> 
-        show_rankings(Socket),
-        wait_loop_cont(Socket, User)
-    end.
+%wait_loop_cont(Socket, User) ->
+%    receive
+%        {começar_partida, _} -> ok % Lógica de jogo
+%    after 30000 -> 
+%        show_rankings(Socket),
+%        wait_loop_cont(Socket, User)
+%    end.
 
 % --- ATUALIZAÇÃO: INICIALIZAR JOGO ---
 inicializar_jogo(ListaJogadores, MatchMakerPid) ->
@@ -343,13 +393,14 @@ partida_loop(Jogadores, Objetos, MatchMakerPid) ->
         tick ->
             JogadoresComInercia = aplicar_movimento_global(Jogadores),
             
-            % 2. NOVO: Processa as colisões com venenos
-            {NovosJogadores, NovosObjetos} = processar_colisoes(JogadoresComInercia, Objetos),
+            {JogadoresAposObjetos, NovosObjetos} = processar_colisoes(JogadoresComInercia, Objetos),
 
-            broadcast_estado(JogadoresComInercia, Objetos),
+            NovosJogadores = processar_capturas_jogadores(JogadoresAposObjetos),
+
+            broadcast_estado(NovosJogadores, NovosObjetos),
             
             erlang:send_after(30, self(), tick),
-            partida_loop(JogadoresComInercia, Objetos, MatchMakerPid);
+            partida_loop(NovosJogadores, NovosObjetos, MatchMakerPid);
 
         % Mudei o _Pid para _PidDown para resolver o warning
         {'DOWN', Ref, process, _PidDown, _Reason} ->
@@ -409,15 +460,15 @@ aplicar_movimento_global(Estado) ->
         NX = max(0.0, min(1920.0, X + NVX)),
         NY = max(0.0, min(1080.0, Y + NVY)),
 
-        FVX = if NX =:= 0.0; NX =:= 1920.0 -> 0.0; true -> NVX end,
-        FVY = if NY =:= 0.0; NY =:= 1080.0 -> 0.0; true -> NVY end,
+        FVX = if NX == 0.0; NX == 1920.0 -> 0.0; true -> NVX end,
+        FVY = if NY == 0.0; NY == 1080.0 -> 0.0; true -> NVY end,
 
         {U, {NX, NY}, {FVX, FVY}, Ang, M, Pid, Ref}
     end, Estado).
 
 % Funções auxiliares simples para Erlang não se queixar
-cos(A) -> math:cos(A).
-sin(A) -> math:sin(A).
+%cos(A) -> math:cos(A).
+%sin(A) -> math:sin(A).
 % Envia o estado para o processo de cada jogador
 % --- ATUALIZAÇÃO: BROADCAST ESTADO (Agora envia P: e O:) ---
 broadcast_estado(Jogadores, Objetos) ->
