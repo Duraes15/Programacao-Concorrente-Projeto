@@ -25,7 +25,8 @@ public class GameClient extends JFrame {
     private StringBuilder rankBuffer = new StringBuilder();
     private boolean collectingRankings = false;
 
-    private Map<String, PlayerData> playerPositions = new ConcurrentHashMap<>();
+    // Substitui a variável playerPositions antiga por esta:
+    private Map<String, GameObject> gameObjectsMap = new ConcurrentHashMap<>();
 
     private String myUsername; 
 
@@ -36,9 +37,12 @@ public class GameClient extends JFrame {
 
     private void initGUI() {
         setTitle("Mini-Jogo Concorrente");
-        setSize(800, 600);
-        setDefaultCloseOperation(EXIT_ON_CLOSE);
         
+        //Maximizar a janela
+        setExtendedState(JFrame.MAXIMIZED_BOTH);
+
+        setDefaultCloseOperation(EXIT_ON_CLOSE);
+
         loginPanel = new LoginPanel();
         add(loginPanel);
         
@@ -233,14 +237,19 @@ class MenuPanel extends JPanel {
     }
 
     // Dentro da classe GameClient, mas fora de outros métodos
-    class PlayerData {
+    class GameObject {
+        String type; // "P" para Player, "O" para Objeto
+        String id;
         double x, y, angulo, massa;
+        int objectType; // 1 para comestível, 2 para venenoso
 
-        PlayerData(double x, double y, double angulo, double massa) {
-            this.x = x;
-            this.y = y;
-            this.angulo = angulo;
-            this.massa = massa;
+        // Construtor para Jogador
+        GameObject(String id, double x, double y, double angulo, double massa) {
+            this.type = "P"; this.id = id; this.x = x; this.y = y; this.angulo = angulo; this.massa = massa;
+        }
+        // Construtor para Objeto
+        GameObject(String id, double x, double y, int objType, double tam) {
+            this.type = "O"; this.id = id; this.x = x; this.y = y; this.objectType = objType; this.massa = tam;
         }
     }
 
@@ -280,18 +289,23 @@ class MenuPanel extends JPanel {
 
         public void updateWorld(String msg) {
             try {
+                // Limpa o mapa para não desenhar objetos que já desapareceram
+                gameObjectsMap.clear(); 
+                
                 String[] parts = msg.split(",");
-                // O parts[0] é "DATA"
                 for (int i = 1; i < parts.length; i++) {
                     String[] data = parts[i].split(":");
-                    String user = data[0].trim(); //// Uso do trim para evitar problemas de nomes que estejam com espaços no fim
-                    double x = Double.parseDouble(data[1]);
-                    double y = Double.parseDouble(data[2]);
-                    double ang = Double.parseDouble(data[3]);
-                    double m = Double.parseDouble(data[4]);
-
-                    // Guardamos o objeto completo no mapa
-                    playerPositions.put(user, new PlayerData(x, y, ang, m));
+                    String category = data[0].trim(); 
+                    
+                    if (category.equals("P")) {
+                        String user = data[1].trim();
+                        gameObjectsMap.put(user, new GameObject(user, Double.parseDouble(data[2]), 
+                            Double.parseDouble(data[3]), Double.parseDouble(data[4]), Double.parseDouble(data[5])));
+                    } else if (category.equals("O")) {
+                        String id = "OBJ_" + data[1].trim();
+                        gameObjectsMap.put(id, new GameObject(id, Double.parseDouble(data[2]), 
+                            Double.parseDouble(data[3]), Integer.parseInt(data[4]), Double.parseDouble(data[5])));
+                    }
                 }
                 repaint();
             } catch (Exception e) {
@@ -304,53 +318,58 @@ class MenuPanel extends JPanel {
             super.paintComponent(g);
             Graphics2D g2 = (Graphics2D) g;
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-        
-            // 1. Desenhar o mapa (temos um problema: acredito que precisamos
-            // garantir que, quando um jogador fica com o ecrã do jogo igual ao ecrã
-            // do portátil, o jogador consiga explorar todo o espaço. Da maneira que está definida no
-            // server, o espaço para o jogador explorar é bem menor do que o espaço do ecrã dos nossos
-            // portáteis.)
             
-            // Fundo do mapa (vazio)
-            g2.setColor(Color.WHITE); // É dito para usarmos a cor branca no enunciado
+            // Fundo "fora" do mapa (para quando a janela for esticada)
+            g2.setColor(Color.LIGHT_GRAY);
             g2.fillRect(0, 0, getWidth(), getHeight());
 
-            // Limites do espaço (borda nos 4 lados)
+            // Fundo da área jogável fixa (1920 x 1080)
+            g2.setColor(Color.WHITE);
+            g2.fillRect(0, 0, 1920, 1080);
+
+            // Limites do espaço jogável
             g2.setColor(Color.DARK_GRAY);
-            g2.setStroke(new BasicStroke(5)); // Espessura da parede
-            g2.drawRect(0, 0, getWidth(), getHeight());
+            g2.setStroke(new BasicStroke(5)); 
+            g2.drawRect(0, 0, 1920, 1080);
 
-            playerPositions.forEach((user, p) -> {
-                int radius = (int) Math.sqrt(p.massa * 20); 
-                int ix = (int) p.x;
-                int iy = (int) p.y;
-            
-                // --- AQUI ---
-                // Definimos a espessura da linha para 3 píxeis
-                g2.setStroke(new BasicStroke(3)); 
-            
-                // 1. Cor da Borda
-                // Uso do trim para evitar problemas de nomes que estejam com espaços no fim
-                if (myUsername != null && user.trim().equals(myUsername.trim()))
-                    g2.setColor(Color.BLUE);
-                else 
-                    g2.setColor(Color.RED);
+            gameObjectsMap.values().forEach(obj -> {
+                int ix = (int) obj.x;
+                int iy = (int) obj.y;
 
-                // Desenha a borda (agora com 3px de espessura)
-                g2.drawOval(ix - radius, iy - radius, radius * 2, radius * 2);
-            
-                // 2. Interior Preto (Avatar)
-                g2.setColor(Color.BLACK);
-                g2.fillOval(ix - radius, iy - radius, radius * 2, radius * 2);
-            
-                // 3. Linha de Direção (Branca) - Também será desenhada com 3px!
-                g2.setColor(Color.WHITE);
-                int targetX = (int) (ix + Math.cos(p.angulo) * radius);
-                int targetY = (int) (iy + Math.sin(p.angulo) * radius);
-                g2.drawLine(ix, iy, targetX, targetY);
-            
-                // Nome por cima
-                g2.drawString(user, ix - radius, iy - radius - 5);
+                if (obj.type.equals("P")) {
+                    // --- DESENHAR JOGADOR ---
+                    int radius = (int) Math.sqrt(obj.massa * 20); 
+                    g2.setStroke(new BasicStroke(3)); 
+                
+                    // Cor da Borda (Azul para próprio, Vermelho para outros)
+                    if (myUsername != null && obj.id.equals(myUsername)) g2.setColor(Color.BLUE);
+                    else g2.setColor(Color.RED);
+                    g2.drawOval(ix - radius, iy - radius, radius * 2, radius * 2);
+                
+                    // Interior Preto
+                    g2.setColor(Color.BLACK);
+                    g2.fillOval(ix - radius, iy - radius, radius * 2, radius * 2);
+                
+                    // Linha de Direção Branca
+                    g2.setColor(Color.WHITE);
+                    int targetX = (int) (ix + Math.cos(obj.angulo) * radius);
+                    int targetY = (int) (iy + Math.sin(obj.angulo) * radius);
+                    g2.drawLine(ix, iy, targetX, targetY);
+                
+                    // Nome por cima
+                    g2.setColor(Color.BLACK);
+                    g2.drawString(obj.id, ix - radius, iy - radius - 5);
+                } 
+                else if (obj.type.equals("O")) {
+                    // --- DESENHAR OBJETO ---
+                    int radius = (int) obj.massa; 
+                    
+                    // Verde para comestível (1), Vermelho para venenoso (2)
+                    if (obj.objectType == 1) g2.setColor(Color.GREEN);
+                    else g2.setColor(Color.RED);
+                    
+                    g2.fillOval(ix - radius, iy - radius, radius * 2, radius * 2);
+                }
             });
         }
     }

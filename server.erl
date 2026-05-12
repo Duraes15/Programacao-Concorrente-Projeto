@@ -1,5 +1,10 @@
 -module(server).
 -export([start/1, handle_client/1]).
+-define(MIN_MASSA, 10.0).
+
+% Função para calcular a distância entre dois pontos (X1,Y1) e (X2,Y2)
+distancia({X1, Y1}, {X2, Y2}) ->
+    math:sqrt(math:pow(X2 - X1, 2) + math:pow(Y2 - Y1, 2)).
 
 start(Gate) ->
     try ets:new(utilizadores, [set, public, named_table])
@@ -137,6 +142,59 @@ menu_loop(Socket, User) ->
             ok
     end.
 
+gerar_objetos(0) -> [];
+gerar_objetos(N) ->
+    % Usamos unique_integer para garantir que nunca há dois objetos com o mesmo ID
+    Id = erlang:unique_integer([positive]), 
+    X = rand:uniform(1920) * 1.0, 
+    Y = rand:uniform(1080) * 1.0, 
+    Tipo = rand:uniform(2), 
+    Tamanho = 10.0 + rand:uniform(20), 
+    [{obj, Id, {X, Y}, Tipo, Tamanho} | gerar_objetos(N-1)].
+
+processar_colisoes(Jogadores, Objetos) ->
+    % Separa os venenosos (Tipo 2) dos comestíveis
+    {Venenosos, Outros} = lists:partition(fun({obj, _, _, Tipo, _}) -> Tipo == 2 end, Objetos),
+    
+    % Faz a colisão de cada jogador
+    {NovosJogadores, VenenosRestantes} = lists:foldl(fun(Jogador, {AccJ, AccV}) ->
+        {NovoJ, NovosV} = verificar_colisao_veneno(Jogador, AccV),
+        {[NovoJ | AccJ], NovosV}
+    end, {[], Venenosos}, Jogadores),
+    
+    % Gera novos venenos para substituir os que desapareceram
+    NumDesaparecidos = length(Venenosos) - length(VenenosRestantes),
+    NovosVenenos = gerar_objetos_venenosos(NumDesaparecidos),
+    
+    % Devolve o estado atualizado
+    {lists:reverse(NovosJogadores), Outros ++ VenenosRestantes ++ NovosVenenos}.
+
+verificar_colisao_veneno(Jogador = {U, PosJ, V, Ang, M, Pid, Ref}, Venenosos) ->
+    RaioP = math:sqrt(M * 20),
+    
+    lists:foldl(fun(Obj = {obj, IdO, PosO, _, TamO}, {J = {U1, P1, V1, A1, M1, Pid1, Ref1}, AccV}) ->
+        Dist = distancia(PosJ, PosO),
+        if Dist < (RaioP + TamO) ->
+            % COLIDIU! Perde a massa do objeto [cite: 30]
+            NovaMassa = max(?MIN_MASSA, M1 - TamO),
+            io:format(">> COLISAO: ~s bateu num veneno! Massa: ~.2f -> ~.2f~n", [U1, M1, NovaMassa]),
+            
+            NovoJ = {U1, P1, V1, A1, NovaMassa, Pid1, Ref1},
+            NovoV = lists:keydelete(IdO, 2, AccV), % Remove o objeto pelo ID
+            {NovoJ, NovoV};
+        true ->
+            {J, AccV} % Não colidiu
+        end
+    end, {Jogador, Venenosos}, Venenosos).
+
+% Função exclusiva para gerar venenos quando os antigos forem comidos
+gerar_objetos_venenosos(0) -> [];
+gerar_objetos_venenosos(N) ->
+    Id = erlang:unique_integer([positive]),
+    X = rand:uniform(1920) * 1.0,
+    Y = rand:uniform(1080) * 1.0,
+    [{obj, Id, {X, Y}, 2, 10.0 + rand:uniform(20)} | gerar_objetos_venenosos(N-1)].
+
 show_rankings(Socket) ->
     Lista = ets:tab2list(rankings),
     gen_tcp:send(Socket, <<"RANK_START\n">>), % Avisa o Java para começar a guardar
@@ -245,8 +303,8 @@ wait_loop_cont(Socket, User) ->
         wait_loop_cont(Socket, User)
     end.
 
+% --- ATUALIZAÇÃO: INICIALIZAR JOGO ---
 inicializar_jogo(ListaJogadores, MatchMakerPid) ->
-    % {User, {X, Y}, {VelX, VelY}, Angulo, Massa, Pid}
     EstadoInicial = [
         begin
             Ref = monitor (process, Pid),
@@ -254,47 +312,54 @@ inicializar_jogo(ListaJogadores, MatchMakerPid) ->
         end
         || {I, {User, Pid, _Ref}} <- lists:zip(lists:seq(1, length(ListaJogadores)), ListaJogadores) ],
 
+    % Criamos 10 objetos no mapa logo no início
+    ObjetosIniciais = gerar_objetos(30),
+
     [Pid ! {começar_partida, self()} || {_User, Pid, _Ref} <- ListaJogadores],
     self() ! tick, 
-    partida_loop(EstadoInicial, MatchMakerPid).
+    % Passamos os Jogadores e os Objetos separadamente
+    partida_loop(EstadoInicial, ObjetosIniciais, MatchMakerPid).
 
-partida_loop(Estado, MatchMakerPid) ->
+% --- ATUALIZAÇÃO: PARTIDA LOOP (Agora recebe Objetos) ---
+partida_loop(Jogadores, Objetos, MatchMakerPid) ->
     receive
         {mover, User, Tecla} ->
             case Tecla of 
                 "ESC" ->
-                    EstadoSaiu = lists:filter(fun({U, _Pos, _Vel, _Ang, _M, _Pid, _R}) -> User == U end, Estado),
-                    NovoEstado = lists:filter(fun({U, _Pos, _Vel, _Ang, _M, _Pid, _R}) -> User =/= U end, Estado),
+                    JogadoresSaiu = lists:filter(fun({U, _Pos, _Vel, _Ang, _M, _P, _R}) -> User == U end, Jogadores),
+                    NovosJogadores = lists:filter(fun({U, _Pos, _Vel, _Ang, _M, _P, _R}) -> User =/= U end, Jogadores),
 
-                    broadcast_saiu(EstadoSaiu),
+                    broadcast_saiu(JogadoresSaiu),
 
-                    check_winner(NovoEstado, MatchMakerPid);
+                    % Agora passamos os Objetos para o check_winner
+                    check_winner(NovosJogadores, Objetos, MatchMakerPid);
                     
                 _ ->
-                    % 1. Encontra o jogador na lista e aplica a aceleração/torque
-                    NovoJogador = calcular_fisica(User, Tecla, Estado),
-                    % 2. Substitui o jogador antigo pelo novo na lista global
-                    NovoEstado = lists:keyreplace(User, 1, Estado, NovoJogador),
-                    partida_loop(NovoEstado, MatchMakerPid)
+                    NovoJogador = calcular_fisica(User, Tecla, Jogadores),
+                    NovosJogadores = lists:keyreplace(User, 1, Jogadores, NovoJogador),
+                    partida_loop(NovosJogadores, Objetos, MatchMakerPid)
                 end;
 
         tick ->
-            % 3. ATUALIZAÇÃO DA INÉRCIA: Move todos os jogadores baseando-se na velocidade atual
-            EstadoComInercia = aplicar_movimento_global(Estado),
+            JogadoresComInercia = aplicar_movimento_global(Jogadores),
             
-            % 4. Broadcast do estado atualizado
-            broadcast_estado(EstadoComInercia),
+            % 2. NOVO: Processa as colisões com venenos
+            {NovosJogadores, NovosObjetos} = processar_colisoes(JogadoresComInercia, Objetos),
+
+            broadcast_estado(JogadoresComInercia, Objetos),
             
             erlang:send_after(30, self(), tick),
-            partida_loop(EstadoComInercia, MatchMakerPid);
+            partida_loop(JogadoresComInercia, Objetos, MatchMakerPid);
 
-        {'DOWN', Ref, process, _Pid, _Reason} ->
-            NovoEstado = lists:filter(fun({_User, _Pos, _Vel, _Ang, _M, _Pid, R}) -> R =/= Ref end, Estado),
-            check_winner(NovoEstado, MatchMakerPid);
+        % Mudei o _Pid para _PidDown para resolver o warning
+        {'DOWN', Ref, process, _PidDown, _Reason} ->
+            NovosJogadores = lists:filter(fun({_User, _Pos, _Vel, _Ang, _M, _P, R}) -> R =/= Ref end, Jogadores),
+            
+            % Agora passamos os Objetos para o check_winner
+            check_winner(NovosJogadores, Objetos, MatchMakerPid);
 
         {fim_de_jogo} ->
             MatchMakerPid ! {partida_terminou}
-        
     end.
 
 
@@ -303,18 +368,19 @@ partida_loop(Estado, MatchMakerPid) ->
 -define(TORQUE, 0.15).  % era 0.1
 -define(ATRITO, 0.995). % era 0.98 — travava em ~1 segundo
 
-check_winner(Estado, MatchMakerPid) ->
-    case(length(Estado)) of
+% --- ATUALIZAÇÃO: CHECK WINNER AGORA RECEBE OBJETOS ---
+check_winner(Jogadores, Objetos, MatchMakerPid) ->
+    case length(Jogadores) of
         1 -> 
-            [Winner] = Estado, 
+            [Winner] = Jogadores, 
             {UserWinner, _, _, _, _, _, _} = Winner,
             io:format("Vencedor: ~p~n", [UserWinner]),
 
-            broadcast_fim(Estado),
+            broadcast_fim(Jogadores),
 
             MatchMakerPid ! {partida_terminou};
         _ ->
-            partida_loop(Estado, MatchMakerPid)
+            partida_loop(Jogadores, Objetos, MatchMakerPid)
     end.
 
 calcular_fisica(User, Comando, Estado) ->
@@ -340,11 +406,11 @@ aplicar_movimento_global(Estado) ->
         NVX = VX * ?ATRITO,
         NVY = VY * ?ATRITO,
 
-        NX = max(0.0, min(800.0, X + NVX)),
-        NY = max(0.0, min(600.0, Y + NVY)),
+        NX = max(0.0, min(1920.0, X + NVX)),
+        NY = max(0.0, min(1080.0, Y + NVY)),
 
-        FVX = if NX =:= 0.0; NX =:= 800.0 -> 0.0; true -> NVX end,
-        FVY = if NY =:= 0.0; NY =:= 600.0 -> 0.0; true -> NVY end,
+        FVX = if NX =:= 0.0; NX =:= 1920.0 -> 0.0; true -> NVX end,
+        FVY = if NY =:= 0.0; NY =:= 1080.0 -> 0.0; true -> NVY end,
 
         {U, {NX, NY}, {FVX, FVY}, Ang, M, Pid, Ref}
     end, Estado).
@@ -353,15 +419,21 @@ aplicar_movimento_global(Estado) ->
 cos(A) -> math:cos(A).
 sin(A) -> math:sin(A).
 % Envia o estado para o processo de cada jogador
-broadcast_estado(Estado) ->
-    StringEstado = "DATA" ++ lists:foldl(fun({U, {X, Y}, _, Ang, M, _Pid, _}, Acc) -> 
-        % Usamos float(X) para garantir que o io_lib não crasha se receber um inteiro
-        JogadorData = io_lib:format(",~s:~.2f:~.2f:~.2f:~.2f", 
+% --- ATUALIZAÇÃO: BROADCAST ESTADO (Agora envia P: e O:) ---
+broadcast_estado(Jogadores, Objetos) ->
+    MsgJogadores = lists:foldl(fun({U, {X, Y}, _, Ang, M, _Pid, _}, Acc) -> 
+        JogadorData = io_lib:format(",P:~s:~.2f:~.2f:~.2f:~.2f", 
                                     [U, float(X), float(Y), float(Ang), float(M)]),
         Acc ++ lists:flatten(JogadorData)
-    end, "", Estado),
+    end, "DATA", Jogadores),
     
-    [Pid ! {actualizar_mundo, StringEstado} || {_, _, _, _, _, Pid, _} <- Estado].
+    MsgCompleta = lists:foldl(fun({obj, Id, {X, Y}, Tipo, Tam}, Acc) ->
+        ObjetoData = io_lib:format(",O:~p:~.2f:~.2f:~p:~.2f", 
+                                   [Id, float(X), float(Y), Tipo, float(Tam)]),
+        Acc ++ lists:flatten(ObjetoData)
+    end, MsgJogadores, Objetos),
+    
+    [Pid ! {actualizar_mundo, MsgCompleta} || {_, _, _, _, _, Pid, _} <- Jogadores].
 
 broadcast_fim(Estado) ->
     [Pid ! {fim_de_jogo} || {_, _, _, _, _, Pid, _} <- Estado].
