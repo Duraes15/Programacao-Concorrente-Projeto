@@ -508,12 +508,15 @@ game_loop(Socket, User, MestrePid) ->
 
         {fim_de_jogo} ->
             gen_tcp:send(Socket, <<"FIM\n">>),
+            inet:setopts(Socket, [{active, false}]),
+            menu_loop(Socket,User),
             ok;
         {saiu} ->
-            ets:delete(sessoes_ativas, User),
             gen_tcp:send(Socket, <<"FIM\n">>),
             io:format("DESISTÊNCIA: ~s abandonou a partida em curso!~n", [User]),
-            exit(done);
+            ets:delete(sessoes_ativas, User),
+            inet:setopts(Socket, [{active, false}]),
+            menu_loop(Socket, User);
         % game_loop
         {tcp_closed, _Socket} ->
             ets:delete(sessoes_ativas, User),  % NOVO
