@@ -32,21 +32,21 @@ public class GameClient extends JFrame {
 
     public GameClient() {
         initGUI();
-        conectarServidor();
+        SwingUtilities.invokeLater(() -> conectarServidor());
     }
 
     private void initGUI() {
         setTitle("Mini-Jogo Concorrente");
-        
-        //Maximizar a janela
-        setExtendedState(JFrame.MAXIMIZED_BOTH);
-
         setDefaultCloseOperation(EXIT_ON_CLOSE);
 
-        loginPanel = new LoginPanel();
-        add(loginPanel);
-        
         setVisible(true);
+        setExtendedState(JFrame.MAXIMIZED_BOTH);
+        
+        loginPanel = new LoginPanel();
+        getContentPane().add(loginPanel);
+        
+        revalidate();
+        repaint();
     }
 
     private void conectarServidor() {
