@@ -1,8 +1,5 @@
 TO DO:
-- Sistema de capturas de outros players
-- Spawn de novos comestíveis e de players quando consumidos
 - Sistema de pontuação para os players (Ganhar pontos por captura, player com mais pontos no fim dos 2 min ganha, rankings)
-
 
 Problemas atuais:
 - Posso ser só eu mas o jogo corre bastante lagado
@@ -18,3 +15,5 @@ Done:
 - Decidir se teremos que mudar o tamanho do mapa (o espaço onde os jogadores conseguem se movimentar, e não a delimitação gráfica)
 - Quando todos os jogadores saem, terminar automaticamente a partida
 - Quando todos os jogadores saem, menos 1 deles, esse ganha automaticamente
+- Sistema de capturas de outros players
+- Spawn de novos comestíveis e de players quando consumidos
