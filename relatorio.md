@@ -50,9 +50,15 @@ O servidor tira partido do modelo de atores do Erlang para suportar múltiplos u
 
 ### 3.2. Matchmaking e Simulação de Partida
 * **Gestão de Filas:** O processo `match_maker_loop/2` recebe pedidos de entrada na fila e estados de prontidão (`READY`). A função `verificar_inicio_partida/2` monitoriza quando 3 ou 4 jogadores estão prontos, iniciando a simulação via `iniciar_jogo_com_n/3`.
-* **Ciclo de Jogo (Game Loop):** A função `partida_loop/3` gere o estado ativo de cada jogo, processando mensagens de movimento e eventos `tick` a cada 30ms.
-* **Física e Colisões:** Em cada `tick`, a função `aplicar_movimento_global/1` atualiza as posições com base na inércia e limites do mapa. As colisões são tratadas por `processar_colisoes/2`, que utiliza as funções `verificar_colisao_veneno/2` e `verificar_colisao_comestivel/2` para ajustar a massa dos jogadores. A função `processar_capturas_jogadores/1` gere a mecânica de um jogador comer outro (PVP).
-* **Sincronização:** A função `broadcast_estado/2` compila o estado atual de todos os jogadores e objetos numa string formatada e envia-a para os processos de cada jogador, garantindo que todos os clientes vejam o mesmo cenário.
+* **Simulação de Física (`tick`):** A cada 30ms, o `partida_loop` executa uma sequência rigorosa:
+    1. **Movimento:** `aplicar_movimento_global/1` calcula as novas posições considerando o atrito (`?ATRITO`) e os limites do mapa.
+    2. **Colisões Geométricas:** `processar_colisoes/2` utiliza a distância euclidiana para detetar toques em venenos ou sobreposições em comestíveis.
+    3. **Resolução de Capturas (PVP):** A função `processar_capturas_jogadores/1` ordena os jogadores por massa antes de processar os ataques, garantindo que o jogador com a maior massa tenha sempre prioridade sobre os jogadores com as menores massas.
+* **Protocolo de Sincronização:** A função `broadcast_estado/2` serializa o estado complexo do Erlang numa string simplificada, a fim de facilitar o *parsing* no Java.
 
 ## 4. Conclusão
-O desenvolvimento deste projeto permitiu consolidar na prática os fundamentos teóricos de sistemas distribuídos e programação concorrente. A separação clara entre a representação visual e a autoridade da simulação (servidor) demonstrou ser eficaz na prevenção de dessincronizações num ecossistema multijogador em rede. 
+O desenvolvimento deste projeto demonstrou a eficácia da separação de responsabilidades entre um servidor robusto, seguindo o modelo de troca de mensagens, e um cliente visual. A utilização do Erlang revelou-se ideal para a gestão de múltiplas partidas e sessões concorrentes devido à leveza dos seus processos e facilidade de monitorização (`monitor/2`), que seria bem mais complexo de se fazer ao utilizar uma linguagem como o Java, por exemplo, que segue uma estratégia para tratar concorrência bem diferente.
+
+Um dos maiores desafios técnicos superados foi a sincronização do estado visual com a lógica do servidor. A implementação da limpeza do mapa local no Java (`gameObjectsMap.clear()`) a cada atualização de rede foi fundamental para eliminar os ditos "objetos fantasma" e garantir que a interface refletisse fielmente as colisões processadas no servidor. 
+
+Em suma, o sistema cumpre a maior parte dos requisitos do enunciado, desde a autenticação segura até à mecânica complexa de capturas e gestão dinâmica de massa, resultando numa aplicação multijogador minimamente funcional e escalável dentro dos limites propostos. 
