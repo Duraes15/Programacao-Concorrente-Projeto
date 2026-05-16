@@ -365,7 +365,7 @@ class MenuPanel extends JPanel {
                     g2.drawString(obj.id, ix - radius, iy - radius - 5);
                 } 
                 else if (obj.type.equals("O")) {
-                    // --- DESENHAR OBJETO ---
+                    // DESENHAR OBJETO
                     int radius = (int) obj.massa; 
                     
                     // Verde para comestível (1), Vermelho para venenoso (2)
