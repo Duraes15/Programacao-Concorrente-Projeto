@@ -268,6 +268,7 @@ class MenuPanel extends JPanel {
 
 class GamePanel extends JPanel {
     // volatile garante visibilidade entre threads sem synchronized
+    private volatile int tempoRestante = 120;
     private volatile String lastWorldState = null;
     private final Set<Integer> keysPressed = new HashSet<>();
     private Timer inputTimer;
@@ -331,6 +332,8 @@ class GamePanel extends JPanel {
                     gameObjectsMap.put(id, new GameObject(id,
                         Double.parseDouble(data[2]), Double.parseDouble(data[3]),
                         Integer.parseInt(data[4]),   Double.parseDouble(data[5])));
+                }else if (category.equals("T")) {
+                    tempoRestante = Integer.parseInt(data[1].trim());
                 }
             }
         } catch (Exception e) {
@@ -422,6 +425,26 @@ class GamePanel extends JPanel {
                     g2.fillOval(ix - radius, iy - radius, radius * 2, radius * 2);
                 }
             });
+            // ── Timer ──────────────────────────────────────────────
+            int mins = tempoRestante / 60;
+            int segs = tempoRestante % 60;
+            String timerStr = String.format("%d:%02d", mins, segs);
+
+            Font timerFont = new Font("Arial", Font.BOLD, 36);
+            g2.setFont(timerFont);
+            FontMetrics fm = g2.getFontMetrics();
+            int timerW = fm.stringWidth(timerStr);
+
+            // Fundo semitransparente centrado no topo
+            int tx = 960 - timerW / 2 - 10;  // centrado no mapa de 1920px
+            g2.setColor(new Color(0, 0, 0, 160));
+            g2.fillRoundRect(tx, 12, timerW + 20, fm.getHeight() + 10, 10, 10);
+
+            g2.setColor(Color.WHITE);
+            g2.drawString(timerStr, tx + 10, 12 + fm.getAscent() + 5);
+
+            // Repõe a font padrão para não afetar o resto do desenho
+            g2.setFont(getFont());
         }
 }
 

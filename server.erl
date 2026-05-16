@@ -371,16 +371,17 @@ inicializar_jogo(ListaJogadores, MatchMakerPid) ->
 
     ObjetosIniciais = gerar_objetos(30),
     [Pid ! {começar_partida, self()} || {_User, Pid, _Ref} <- ListaJogadores],
+    TempoFim = erlang:monotonic_time(millisecond) + 120000,
     self() ! tick,
     erlang:send_after(120000, self(), fim_tempo),   %% ← NOVO: 2 minutos
-    partida_loop(EstadoInicial, ObjetosIniciais, MatchMakerPid, #{}).
+    partida_loop(EstadoInicial, ObjetosIniciais, MatchMakerPid, #{}, TempoFim).
 
 % --- ATUALIZAÇÃO: PARTIDA LOOP (Agora recebe Objetos) ---
 %% ADICIONADO: 4º argumento Capturas = #{User => N}
 %% ADICIONADO: timer de 2 minutos com erlang:send_after
 %% ADICIONADO: contagem de capturas PvP em processar_capturas_jogadores
 
-partida_loop(Jogadores, Objetos, MatchMakerPid, Capturas) ->
+partida_loop(Jogadores, Objetos, MatchMakerPid, Capturas, TempoFim) ->
     receive
         {mover, User, Tecla} ->
             case Tecla of
@@ -390,11 +391,11 @@ partida_loop(Jogadores, Objetos, MatchMakerPid, Capturas) ->
                     NovosJogadores = lists:filter(
                         fun({U,_,_,_,_,_,_}) -> U =/= User end, Jogadores),
                     broadcast_saiu(JogadoresSaiu),
-                    check_winner(NovosJogadores, Objetos, MatchMakerPid, Capturas);
+                    check_winner(NovosJogadores, Objetos, MatchMakerPid, Capturas, TempoFim);
                 _ ->
                     NovoJogador = calcular_fisica(User, Tecla, Jogadores),
                     NovosJogadores = lists:keyreplace(User, 1, Jogadores, NovoJogador),
-                    partida_loop(NovosJogadores, Objetos, MatchMakerPid, Capturas)
+                    partida_loop(NovosJogadores, Objetos, MatchMakerPid, Capturas, TempoFim)
             end;
 
         tick ->
@@ -408,9 +409,9 @@ partida_loop(Jogadores, Objetos, MatchMakerPid, Capturas) ->
             NovasCapturas = maps:fold(
                 fun(U, N, Acc) -> maps:update_with(U, fun(V) -> V + N end, N, Acc) end,
                 Capturas, CapturasDelta),
-            broadcast_estado(NovosJogadores, NovosObjetos, NovasCapturas),
+            broadcast_estado(NovosJogadores, NovosObjetos, NovasCapturas, TempoFim),
             erlang:send_after(20, self(), tick),
-            partida_loop(NovosJogadores, NovosObjetos, MatchMakerPid, NovasCapturas);
+            partida_loop(NovosJogadores, NovosObjetos, MatchMakerPid, NovasCapturas, TempoFim);
 
         %% Timer de fim de partida (2 minutos = 120 000 ms)
         %% Dispara este após iniciar a partida:
@@ -423,7 +424,7 @@ partida_loop(Jogadores, Objetos, MatchMakerPid, Capturas) ->
         {'DOWN', Ref, process, _PidDown, _Reason} ->
             NovosJogadores = lists:filter(
                 fun({_,_,_,_,_,_,R}) -> R =/= Ref end, Jogadores),
-            check_winner(NovosJogadores, Objetos, MatchMakerPid, Capturas);
+            check_winner(NovosJogadores, Objetos, MatchMakerPid, Capturas, TempoFim);
 
         {fim_de_jogo} ->
             MatchMakerPid ! {partida_terminou}
@@ -445,7 +446,7 @@ partida_loop(Jogadores, Objetos, MatchMakerPid, Capturas) ->
 %%   ets:new(rankings, [set, public, named_table])
 %% (sem {keypos,2} — a chave é o campo 1 = User, valor = vitórias)
 
-check_winner(Jogadores, Objetos, MatchMakerPid, Capturas) ->
+check_winner(Jogadores, Objetos, MatchMakerPid, Capturas, TempoFim) ->
     case length(Jogadores) of
         0 ->
             %% Empate ou todos saíram — ignora para rankings (spec)
@@ -458,7 +459,7 @@ check_winner(Jogadores, Objetos, MatchMakerPid, Capturas) ->
             registar_vencedor(Jogadores, Capturas),
             MatchMakerPid ! {partida_terminou};
         _ ->
-            partida_loop(Jogadores, Objetos, MatchMakerPid, Capturas)
+            partida_loop(Jogadores, Objetos, MatchMakerPid, Capturas, TempoFim)
     end.
 
 %% Determina o vencedor e escreve na tabela ETS rankings.
@@ -538,7 +539,11 @@ aplicar_movimento_global(Estado) ->
 %sin(A) -> math:sin(A).
 % Envia o estado para o processo de cada jogador
 % --- ATUALIZAÇÃO: BROADCAST ESTADO (Agora envia P: e O:) ---
-broadcast_estado(Jogadores, Objetos, Capturas) ->
+broadcast_estado(Jogadores, Objetos, Capturas, TempoFim) ->
+
+    Agora = erlang:monotonic_time(millisecond),
+    SegsRestantes = max(0, (TempoFim - Agora) div 1000),
+
     MsgJogadores = lists:foldl(fun({U, {X, Y}, _, Ang, M, _Pid, _}, Acc) -> 
         JogadorData = io_lib:format(",P:~s:~.2f:~.2f:~.2f:~.2f:~.p", 
                                     [U, float(X), float(Y), float(Ang), float(M),maps:get(U, Capturas, 0)]),
@@ -550,8 +555,10 @@ broadcast_estado(Jogadores, Objetos, Capturas) ->
                                    [Id, float(X), float(Y), Tipo, float(Tam)]),
         Acc ++ lists:flatten(ObjetoData)
     end, MsgJogadores, Objetos),
+
+    MsgFinal = MsgCompleta ++ io_lib:format(",T:~p", [SegsRestantes]),
     
-    [Pid ! {actualizar_mundo, MsgCompleta} || {_, _, _, _, _, Pid, _} <- Jogadores].
+    [Pid ! {actualizar_mundo, MsgFinal} || {_, _, _, _, _, Pid, _} <- Jogadores].
 
 broadcast_fim(Estado) ->
     [Pid ! {fim_de_jogo} || {_, _, _, _, _, Pid, _} <- Estado].
