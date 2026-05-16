@@ -146,8 +146,8 @@ gerar_objetos(0) -> [];
 gerar_objetos(N) ->
     % Usamos unique_integer para garantir que nunca há dois objetos com o mesmo ID
     Id = erlang:unique_integer([positive]), 
-    X = rand:uniform(1920) * 1.0, 
-    Y = rand:uniform(1080) * 1.0, 
+    X = rand:uniform(1905) * 1.0, 
+    Y = rand:uniform(985) * 1.0, 
     Tipo = rand:uniform(2), 
     Tamanho = 10.0 + rand:uniform(20), 
     [{obj, Id, {X, Y}, Tipo, Tamanho} | gerar_objetos(N-1)].
@@ -210,8 +210,8 @@ verificar_colisao_comestivel(Jogador = {_, PosJ, _, _, M, _, _}, Comestiveis) ->
 gerar_objetos_tipo(0, _Tipo) -> [];
 gerar_objetos_tipo(N, Tipo) ->
     Id = erlang:unique_integer([positive]),
-    X = rand:uniform(1920) * 1.0,
-    Y = rand:uniform(1080) * 1.0,
+    X = rand:uniform(1905) * 1.0,
+    Y = rand:uniform(985) * 1.0,
     [{obj, Id, {X, Y}, Tipo, 10.0 + rand:uniform(20)} | gerar_objetos_tipo(N-1, Tipo)].
 
 processar_capturas_jogadores(Jogadores) ->
@@ -234,7 +234,7 @@ engolir_presas(Predador = {U1, Pos1, _, _, _, _, _}, Raio1, [Presa | Resto], Gan
     if (Raio1 > Raio2) andalso ((Dist + Raio2) =< Raio1) ->
         MassaRoubada = M2 / 4.0,
         NovaMassaPresa = max(?MIN_MASSA, M2 - MassaRoubada),
-        NovaPos2 = {rand:uniform(1920) * 1.0, rand:uniform(1080) * 1.0},
+        NovaPos2 = {rand:uniform(1905) * 1.0, rand:uniform(985) * 1.0},
         NovaPresa = {U2, NovaPos2, {0.0, 0.0}, A2, NovaMassaPresa, Pid2, Ref2},
         io:format(">> PVP: ~s engoliu ~s!~n", [U1, U2]),
         {FinalResto, FinalGanho} = engolir_presas(Predador, Raio1, Resto, GanhoMassa + MassaRoubada),
@@ -416,7 +416,7 @@ partida_loop(Jogadores, Objetos, MatchMakerPid) ->
 
 % Constantes da física
 -define(FORCA, 10.0).   % era 5.0 — muito fraco
--define(TORQUE, 0.15).  % era 0.1
+-define(TORQUE, 0.2).  % era 0.1
 -define(ATRITO, 0.995). % era 0.98 — travava em ~1 segundo
 
 % --- ATUALIZAÇÃO: CHECK WINNER AGORA RECEBE OBJETOS ---
@@ -457,11 +457,11 @@ aplicar_movimento_global(Estado) ->
         NVX = VX * ?ATRITO,
         NVY = VY * ?ATRITO,
 
-        NX = max(0.0, min(1920.0, X + NVX)),
-        NY = max(0.0, min(1080.0, Y + NVY)),
+        NX = max(0.0, min(1905.0, X + NVX)),
+        NY = max(0.0, min(985.0, Y + NVY)),
 
-        FVX = if NX == 0.0; NX == 1920.0 -> 0.0; true -> NVX end,
-        FVY = if NY == 0.0; NY == 1080.0 -> 0.0; true -> NVY end,
+        FVX = if NX == 0.0; NX == 1905.0 -> 0.0; true -> NVX end,
+        FVY = if NY == 0.0; NY == 985.0 -> 0.0; true -> NVY end,
 
         {U, {NX, NY}, {FVX, FVY}, Ang, M, Pid, Ref}
     end, Estado).

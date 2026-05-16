@@ -100,6 +100,10 @@ public class GameClient extends JFrame {
             gamePanel.updateWorld(msg);
         }
         else if (msg.contains("FIM")){
+            if (gamePanel != null) {
+                gamePanel.stopInput(); // Para o timer antes de mudar de ecrã
+                gamePanel = null;
+            }
             SwingUtilities.invokeLater(() -> mudarParaMenu());
         }
         // 4. Mensagens informativas (Fila de espera, erros, etc)
@@ -330,7 +334,7 @@ class MenuPanel extends JPanel {
             // Limites do espaço jogável
             g2.setColor(Color.DARK_GRAY);
             g2.setStroke(new BasicStroke(5)); 
-            g2.drawRect(0, 0, 1920, 1080);
+            g2.drawRect(0, 0, 1905, 985);
 
             gameObjectsMap.values().forEach(obj -> {
                 int ix = (int) obj.x;
