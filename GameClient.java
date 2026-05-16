@@ -412,7 +412,7 @@ class GamePanel extends JPanel {
                     g2.drawString(labelScore, ix - scoreW / 2, iy - radius - pad);
                 } 
                 else if (obj.type.equals("O")) {
-                    // --- DESENHAR OBJETO ---
+                    // DESENHAR OBJETO
                     int radius = (int) obj.massa; 
                     
                     // Verde para comestível (1), Vermelho para venenoso (2)
