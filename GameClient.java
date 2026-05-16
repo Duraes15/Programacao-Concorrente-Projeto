@@ -26,9 +26,6 @@ public class GameClient extends JFrame {
 
     private String myUsername;
 
-    // FIX: estado da fila guardado no GameClient, acessível a todas as classes internas.
-    // Antes era calculado a partir do estado do menuPanel na thread do socket
-    // (race condition). Agora é atualizado diretamente nos action listeners.
     private boolean estavaNaFila = false;
 
     public GameClient() {
@@ -71,8 +68,6 @@ public class GameClient extends JFrame {
         }
         if (msg.equals("RANK_END")) {
             collectingRankings = false;
-            // FIX: lê estavaNaFila do campo do GameClient, não do estado do menuPanel.
-            // O campo é atualizado na EDT pelos action listeners — sem race condition.
             boolean voltarParaFila = estavaNaFila;
             SwingUtilities.invokeLater(() -> mudarParaRanking(rankBuffer.toString(), voltarParaFila));
             return;
@@ -142,8 +137,6 @@ public class GameClient extends JFrame {
         repaint();
     }
 
-    // FIX: extraído para método próprio para ser chamado tanto pelo botão "Voltar"
-    // do RankingPanel (quando estava na fila) como pelo MenuPanel normal.
     private void mudarParaMenuComFila() {
         getContentPane().removeAll();
         menuPanel = new MenuPanel();
@@ -152,13 +145,12 @@ public class GameClient extends JFrame {
         menuPanel.readyBtn.setVisible(true);
         menuPanel.rankBtn.setVisible(true);
         menuPanel.setInfo("Ainda estás na fila. Clica em 'Estou Pronto' para jogar.");
-        // FIX: add() e revalidate() chamados no GameClient (JFrame), não no JPanel
         GameClient.this.add(menuPanel);
         GameClient.this.revalidate();
         GameClient.this.repaint();
     }
 
-    // --- SUB-ECRÃS ---
+    //  SUB-ECRÃS
 
     class LoginPanel extends JPanel {
         JTextField userField = new JTextField(10);
@@ -216,7 +208,6 @@ public class GameClient extends JFrame {
 
             playBtn.addActionListener(e -> {
                 out.println("1");
-                // FIX: atualiza o campo do GameClient ao entrar na fila
                 estavaNaFila = true;
                 playBtn.setEnabled(false);
                 readyBtn.setVisible(true);
@@ -226,7 +217,6 @@ public class GameClient extends JFrame {
 
             readyBtn.addActionListener(e -> {
                 out.println("READY");
-                // FIX: após enviar READY o jogador já não "volta à fila" se ver rankings
                 estavaNaFila = false;
                 readyBtn.setEnabled(false);
                 readyBtn.setText("AGUARDANDO...");
@@ -424,7 +414,6 @@ public class GameClient extends JFrame {
             g2.setColor(new Color(0, 0, 0, 160));
             g2.fillRoundRect(tx, 12, timerW + 20, fm.getHeight() + 10, 10, 10);
 
-            // Vermelho nos últimos 30 segundos
             g2.setColor(tempoRestante <= 30 ? new Color(255, 80, 80) : Color.WHITE);
             g2.drawString(timerStr, tx + 10, 12 + fm.getAscent() + 5);
 
@@ -440,8 +429,6 @@ public class GameClient extends JFrame {
         setLayout(new BorderLayout(0, 0));
         setBorder(BorderFactory.createEmptyBorder(32, 40, 24, 40));
 
-        // Carrega a fonte — faz download uma vez e guarda em /fonts/SpaceGrotesk.ttf
-        // ou usa Arial como fallback se não estiver disponível
         try {
             spaceGrotesk = Font.createFont(Font.TRUETYPE_FONT,
                 new java.io.File("fonts/SpaceGrotesk-Regular.ttf")).deriveFont(14f);
@@ -513,7 +500,6 @@ public class GameClient extends JFrame {
                 lista.add(criarEntrada(linha, i + 1));
             }
         }
-
         lista.revalidate();
         lista.repaint();
     }
@@ -527,7 +513,7 @@ public class GameClient extends JFrame {
         JPanel row = new JPanel(new BorderLayout(12, 0));
         row.setOpaque(false);
         row.setBorder(BorderFactory.createMatteBorder(
-            0, 0, 1, 0, new Color(220, 218, 210)));  // linha divisória em baixo
+            0, 0, 1, 0, new Color(220, 218, 210)));  
         row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 44));
         row.setPreferredSize(new Dimension(0, 44));
 

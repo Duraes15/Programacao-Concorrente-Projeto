@@ -13,7 +13,6 @@ start(Gate) ->
     try ets:new(rankings, [set, public, named_table])
     catch _:_ -> ok end,
 
-    % NOVO — tabela de sessões ativas
     try ets:new(sessoes_ativas, [set, public, named_table])
     catch _:_ -> ok end,
 
@@ -54,16 +53,13 @@ client_loop(Socket) ->
             gen_tcp:send(Socket, <<"\nEscreve o teu comando: ">>),
             client_loop(Socket);
 
-        % ANTES: {error, closed} -> ...
-        % AGORA: apanha qualquer erro de socket
         {error, _Reason} ->
             io:format("Um cliente saiu.\n"),
             ok
     end.
 
-%% --- Lógica de Comandos ---
+%% Lógica de Comandos
 
-%% --- Lógica de Comandos Amigável ---
 
 % REGISTER: Criação de conta 
 process_command(Socket, "register", [User, Pass]) ->
@@ -76,11 +72,11 @@ process_command(Socket, "register", [User, Pass]) ->
 process_command(Socket, "register", _) ->
     gen_tcp:send(Socket, <<"Instrucao: Usa o formato: REGISTER,teu_nome,tua_pass\n">>);
 
-% LOGIN: Autenticação de jogador [cite: 15]
+% LOGIN: Autenticação de jogador
 process_command(Socket, "login", [User, Pass]) ->
     case ets:lookup(utilizadores, User) of
         [{User, Pass}] ->
-            % NOVO — verifica se já há sessão ativa
+            % verifica se já há sessão ativa
             case ets:lookup(sessoes_ativas, User) of
                 [] ->
                     ets:insert(sessoes_ativas, {User, self()}),
@@ -100,7 +96,6 @@ process_command(Socket, "login", _) ->
 process_command(Socket, "cancel", [User, Pass]) ->
     case ets:lookup(utilizadores, User) of
         [{User, Pass}] -> 
-            % Remove o utilizador da tabela ETS
             ets:delete(utilizadores, User),
             gen_tcp:send(Socket, [<<"Sucesso: A conta '">>, list_to_binary(User), <<"' foi removida com exito.\n">>]);
         _ -> 
@@ -109,7 +104,6 @@ process_command(Socket, "cancel", [User, Pass]) ->
 process_command(Socket, "cancel", _) ->
     gen_tcp:send(Socket, <<"Instrucao: Para apagar a tua conta usa: CANCEL,teu_nome,tua_pass\n">>);
 
-% Comando desconhecido
 process_command(Socket, _, _) ->
     gen_tcp:send(Socket, <<"Erro: Comando desconhecido.\nComandos disponiveis: REGISTER, LOGIN, CANCEL\n">>).
 
@@ -134,8 +128,6 @@ menu_loop(Socket, User) ->
                     gen_tcp:send(Socket, <<"Opcao invalida.\n">>),
                     menu_loop(Socket, User)
             end;
-        % ANTES: {error, closed} -> ok
-        % AGORA: apanha qualquer erro de socket
         {error, _Reason} ->
             ets:delete(sessoes_ativas, User),
             io:format("~s desconectou do menu.~n", [User]),
@@ -214,8 +206,6 @@ gerar_objetos_tipo(N, Tipo) ->
     Y = rand:uniform(985) * 1.0,
     [{obj, Id, {X, Y}, Tipo, 10.0 + rand:uniform(20)} | gerar_objetos_tipo(N-1, Tipo)].
 
-%% Versão que devolve {NovosJogadores, CapturasDelta}
-%% onde CapturasDelta = #{User => NumCapturas neste tick}
 processar_capturas_jogadores_com_score(Jogadores) ->
     Sorted = lists:reverse(lists:keysort(5, Jogadores)),
     aplicar_capturas_com_score(Sorted, [], #{}).
@@ -245,7 +235,6 @@ engolir_presas_com_score(Predador = {U1, Pos1,_,_,_,_,_}, Raio1,
         NovaPos2 = {rand:uniform(1920) * 1.0, rand:uniform(1000) * 1.0},
         NovaPresa = {U2, NovaPos2, {0.0, 0.0}, A2, NovaMassaPresa, Pid2, Ref2},
         io:format(">> PVP: ~s engoliu ~s!~n", [U1, U2]),
-        %% Incrementa capturas para este predador
         {FinalResto, FinalGanho, FinalNC} =
             engolir_presas_com_score(Predador, Raio1, Resto,
                                      GanhoMassa + MassaRoubada,
@@ -260,7 +249,6 @@ match_maker_loop(Fila, NumPartidasAtivas) ->
     receive
         {entrar_na_fila, Username, Pid} ->
             Ref = monitor(process, Pid),
-            % Adicionamos o estado 'false' (não está pronto)
             NovaFila = Fila ++ [{Username, Pid, Ref, false}],
             io:format("DEBUG: ~p entrou na fila. Esperando 'Ready'...~n", [Username]),
             match_maker_loop(NovaFila, NumPartidasAtivas);
@@ -308,18 +296,17 @@ iniciar_jogo_com_n(Fila, N, NumPartidasAtivas) ->
     match_maker_loop(Resto, NumPartidasAtivas + 1).
 
 wait_loop(Socket, User) ->
-    % 1. Entra na fila apenas UMA vez
+    % Entra na fila apenas UMA vez
     match_maker ! {entrar_na_fila, User, self()},
     
-    % 2. Ativa o modo de receção de eventos do Socket
+    % Ativa o modo de receção de eventos do Socket
     inet:setopts(Socket, [{active, true}]),
     
-    % 3. Salta para a função que apenas espera pelas mensagens
+    % Salta para a função que apenas espera pelas mensagens
     wait_loop_atento(Socket, User).
 
 wait_loop_atento(Socket, User) ->
     receive
-        % wait_loop_atento
         {tcp_closed, _Socket} ->
             ets:delete(sessoes_ativas, User),
             io:format("~s fechou a aplicação enquanto estava na fila.~n", [User]),
@@ -336,28 +323,15 @@ wait_loop_atento(Socket, User) ->
                 _ -> 
                     wait_loop_atento(Socket, User)
             end;
-        % Capturamos o MestrePid aqui (antigo _Dados)
         {começar_partida, MestrePid} ->
             inet:setopts(Socket, [{active, true}]),
             gen_tcp:send(Socket, <<"A partida vai comecar!\n">>),
-            % Chamamos a função com 3 argumentos para bater certo com a definição
             game_loop(Socket, User, MestrePid)
 
         after 30000 -> 
             gen_tcp:send(Socket, <<"Ainda estas na fila. A aguardar jogadores...\n">>),
             wait_loop_atento(Socket, User)
     end.
-
-% Comentei a função abaixo para não dar warnings
-% Função auxiliar para continuar a espera sem reenviar mensagem ao match_maker
-%wait_loop_cont(Socket, User) ->
-%    receive
-%        {começar_partida, _} -> ok % Lógica de jogo
-%    after 30000 -> 
-%        show_rankings(Socket),
-%        wait_loop_cont(Socket, User)
-%    end.
-
 
 inicializar_jogo(ListaJogadores, MatchMakerPid) ->
     EstadoInicial =
@@ -378,11 +352,6 @@ inicializar_jogo(ListaJogadores, MatchMakerPid) ->
     self() ! tick,
     erlang:send_after(120000, self(), fim_tempo),   %% ← NOVO: 2 minutos
     partida_loop(EstadoInicial, ObjetosIniciais, MatchMakerPid, #{}, TempoFim).
-
-% --- ATUALIZAÇÃO: PARTIDA LOOP (Agora recebe Objetos) ---
-%% ADICIONADO: 4º argumento Capturas = #{User => N}
-%% ADICIONADO: timer de 2 minutos com erlang:send_after
-%% ADICIONADO: contagem de capturas PvP em processar_capturas_jogadores
 
 partida_loop(Jogadores, Objetos, MatchMakerPid, Capturas, TempoFim) ->
     receive
@@ -405,7 +374,6 @@ partida_loop(Jogadores, Objetos, MatchMakerPid, Capturas, TempoFim) ->
             JogadoresComInercia = aplicar_movimento_global(Jogadores),
             {JogadoresAposObjetos, NovosObjetos} =
                 processar_colisoes(JogadoresComInercia, Objetos),
-            %% processar_capturas_jogadores agora devolve {Jogadores, CapturasDelta}
             {NovosJogadores, CapturasDelta} =
                 processar_capturas_jogadores_com_score(JogadoresAposObjetos),
             %% Acumula capturas no mapa
@@ -416,9 +384,6 @@ partida_loop(Jogadores, Objetos, MatchMakerPid, Capturas, TempoFim) ->
             erlang:send_after(20, self(), tick),
             partida_loop(NovosJogadores, NovosObjetos, MatchMakerPid, NovasCapturas, TempoFim);
 
-        %% Timer de fim de partida (2 minutos = 120 000 ms)
-        %% Dispara este após iniciar a partida:
-        %%   erlang:send_after(120000, self(), fim_tempo)
         fim_tempo ->
             broadcast_fim(Jogadores),
             registar_vencedor(Jogadores, Capturas),
@@ -435,24 +400,14 @@ partida_loop(Jogadores, Objetos, MatchMakerPid, Capturas, TempoFim) ->
 
 
 % Constantes da física
--define(FORCA, 10.0).   % era 5.0 — muito fraco
+-define(FORCA, 10.0).   % era 5.0 - muito fraco
 -define(TORQUE, 0.2).  % era 0.1
--define(ATRITO, 0.995). % era 0.98 — travava em ~1 segundo
-
-%% PROBLEMA ORIGINAL: check_winner não atualizava rankings.
-%% A tabela ETS estava com {keypos, 2} mas os dados eram {User, Vits}
-%% onde User é o campo 1 — inconsistência que causava lookup errado.
-%%
-%% FIX: Recria a tabela com keypos padrão (1) e usa update_counter.
-
-%% Em start/1, substitui a linha de criação de rankings por:
-%%   ets:new(rankings, [set, public, named_table])
-%% (sem {keypos,2} — a chave é o campo 1 = User, valor = vitórias)
+-define(ATRITO, 0.995). % era 0.98 - travava em ~1 segundo
 
 check_winner(Jogadores, Objetos, MatchMakerPid, Capturas, TempoFim) ->
     case length(Jogadores) of
         0 ->
-            %% Empate ou todos saíram — ignora para rankings (spec)
+            %% Empate ou todos saíram - ignora para rankings
             MatchMakerPid ! {partida_terminou};
         1 ->
             [Winner] = Jogadores,
@@ -465,8 +420,7 @@ check_winner(Jogadores, Objetos, MatchMakerPid, Capturas, TempoFim) ->
             partida_loop(Jogadores, Objetos, MatchMakerPid, Capturas, TempoFim)
     end.
 
-%% Determina o vencedor e escreve na tabela ETS rankings.
-%% Critério: mais capturas PvP. Empate → partida ignorada (spec).
+%% Critério: mais capturas PvP. Empate - partida ignorada
 registar_vencedor(Jogadores, Capturas) ->
     Users = [U || {U,_,_,_,_,_,_} <- Jogadores],
     Scores = [{maps:get(U, Capturas, 0), U} || U <- Users],
@@ -487,7 +441,6 @@ registar_vencedor(Jogadores, Capturas) ->
             end
     end.
 
-%% Versão de show_rankings corrigida (sem {keypos,2}):
 show_rankings(Socket) ->
     Lista = ets:tab2list(rankings),
     Sorted = lists:reverse(lists:keysort(2, Lista)),
@@ -520,7 +473,6 @@ calcular_fisica(User, Comando, Estado) ->
             {User, {X, Y}, {VX, VY}, Angulo, Massa, Pid, Ref}
     end.
 
-% Esta função corre para TODOS os jogadores a cada 30ms
 aplicar_movimento_global(Estado) ->
     lists:map(fun({U, {X, Y}, {VX, VY}, Ang, M, Pid, Ref}) ->
         NVX = VX * ?ATRITO,
@@ -536,10 +488,9 @@ aplicar_movimento_global(Estado) ->
     end, Estado).
 
 % Funções auxiliares simples para Erlang não se queixar
-%cos(A) -> math:cos(A).
-%sin(A) -> math:sin(A).
+% cos(A) -> math:cos(A).
+% sin(A) -> math:sin(A).
 % Envia o estado para o processo de cada jogador
-% --- ATUALIZAÇÃO: BROADCAST ESTADO (Agora envia P: e O:) ---
 broadcast_estado(Jogadores, Objetos, Capturas, TempoFim) ->
 
     Agora = erlang:monotonic_time(millisecond),
@@ -566,17 +517,15 @@ broadcast_fim(Estado) ->
 
 broadcast_saiu(Estado) ->
     [Pid ! {saiu} || {_, _, _, _, _, Pid, _} <- Estado].
-% Exemplo de como o estado do jogador pode ser controlado
-% Estado = {X, Y}
 game_loop(Socket, User, MestrePid) ->
     receive
-        % 1. Recebe tecla do Java e avisa o Mestre
+        % Recebe tecla do Java e avisa o Mestre
         {tcp, Socket, Data} ->
             Tecla = string:trim(binary_to_list(Data)),
             MestrePid ! {mover, User, Tecla},
             game_loop(Socket, User, MestrePid);
 
-        % 2. Recebe o estado global do Mestre e envia para o Java
+        % Recebe o estado global do Mestre e envia para o Java
         {actualizar_mundo, StringEstado} ->
             gen_tcp:send(Socket, list_to_binary(StringEstado ++ "\n")),
             game_loop(Socket, User, MestrePid);
@@ -592,7 +541,6 @@ game_loop(Socket, User, MestrePid) ->
             ets:delete(sessoes_ativas, User),
             inet:setopts(Socket, [{active, false}]),
             menu_loop(Socket, User);
-        % game_loop
         {tcp_closed, _Socket} ->
             ets:delete(sessoes_ativas, User),  % NOVO
             io:format("DESISTÊNCIA: ~s abandonou a partida em curso!~n", [User]),
