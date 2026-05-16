@@ -246,10 +246,11 @@ class MenuPanel extends JPanel {
         String id;
         double x, y, angulo, massa;
         int objectType; // 1 para comestível, 2 para venenoso
+        int score;
 
         // Construtor para Jogador
-        GameObject(String id, double x, double y, double angulo, double massa) {
-            this.type = "P"; this.id = id; this.x = x; this.y = y; this.angulo = angulo; this.massa = massa;
+        GameObject(String id, double x, double y, double angulo, double massa, int score) {
+            this.type = "P"; this.id = id; this.x = x; this.y = y; this.angulo = angulo; this.massa = massa;this.score = score;
         }
         // Construtor para Objeto
         GameObject(String id, double x, double y, int objType, double tam) {
@@ -257,68 +258,93 @@ class MenuPanel extends JPanel {
         }
     }
 
-    class GamePanel extends JPanel {
-        private final Set<Integer> keysPressed = new HashSet<>();
-        private Timer inputTimer;
+    // PROBLEMA: updateWorld chama repaint() que agenda paint na EDT.
+// O socket reader (thread separada) chama updateWorld, mas se a EDT
+// estiver ocupada com paint, a mailbox do socket acumula e cria lag.
+//
+// FIX: Usar volatile + estratégia "last-write-wins" para o estado do mundo.
+// O socket reader apenas escreve o último estado; o timer de render lê-o.
+// Isto desacopla completamente I/O de rendering — nunca bloqueiam um ao outro.
 
-        public GamePanel() {
-            setFocusable(true);
-            requestFocusInWindow();
+class GamePanel extends JPanel {
+    // volatile garante visibilidade entre threads sem synchronized
+    private volatile String lastWorldState = null;
+    private final Set<Integer> keysPressed = new HashSet<>();
+    private Timer inputTimer;
+    private Timer renderTimer;  // ← NOVO: timer dedicado ao render
 
-            addKeyListener(new KeyAdapter() {
-                @Override
-                public void keyPressed(KeyEvent e) {
-                    keysPressed.add(e.getKeyCode());
-                }
-                @Override
-                public void keyReleased(KeyEvent e) {
-                    keysPressed.remove(e.getKeyCode());
-                }
-            });
+    public GamePanel() {
+        setFocusable(true);
+        requestFocusInWindow();
 
-            // Envia input ao servidor ~33x por segundo
-            inputTimer = new Timer(30, e -> {
-                if (keysPressed.contains(KeyEvent.VK_UP))      out.println("UP");
-                if (keysPressed.contains(KeyEvent.VK_LEFT))    out.println("LEFT");
-                if (keysPressed.contains(KeyEvent.VK_RIGHT))   out.println("RIGHT");
-                if (keysPressed.contains(KeyEvent.VK_ESCAPE))  out.println("ESC");
-            });
-            inputTimer.start();
-        }
+        addKeyListener(new KeyAdapter() {
+            @Override public void keyPressed(KeyEvent e)  { keysPressed.add(e.getKeyCode()); }
+            @Override public void keyReleased(KeyEvent e) { keysPressed.remove(e.getKeyCode()); }
+        });
 
-        // Chama isto quando o jogo terminar para não ficar a enviar mensagens
-        public void stopInput() {
-            if (inputTimer != null) inputTimer.stop();
-        }
+        // Timer de input: envia comandos ao servidor (~33 fps)
+        inputTimer = new Timer(30, e -> {
+            if (keysPressed.contains(KeyEvent.VK_UP))    out.println("UP");
+            if (keysPressed.contains(KeyEvent.VK_LEFT))  out.println("LEFT");
+            if (keysPressed.contains(KeyEvent.VK_RIGHT)) out.println("RIGHT");
+            if (keysPressed.contains(KeyEvent.VK_ESCAPE)) out.println("ESC");
+        });
+        inputTimer.start();
 
-        public void updateWorld(String msg) {
-            try {
-                // Limpa o mapa para não desenhar objetos que já desapareceram
-                gameObjectsMap.clear(); 
-                
-                String[] parts = msg.split(",");
-                for (int i = 1; i < parts.length; i++) {
-                    String[] data = parts[i].split(":");
-                    String category = data[0].trim(); 
-                    
-                    if (category.equals("P")) {
-                        String user = data[1].trim();
-                        gameObjectsMap.put(user, new GameObject(user, Double.parseDouble(data[2]), 
-                            Double.parseDouble(data[3]), Double.parseDouble(data[4]), Double.parseDouble(data[5])));
-                    } else if (category.equals("O")) {
-                        String id = "OBJ_" + data[1].trim();
-                        gameObjectsMap.put(id, new GameObject(id, Double.parseDouble(data[2]), 
-                            Double.parseDouble(data[3]), Integer.parseInt(data[4]), Double.parseDouble(data[5])));
-                    }
-                }
-                repaint();
-            } catch (Exception e) {
-                System.out.println("Erro no parser: " + e.getMessage());
+        // Timer de render: lê o último estado e redesenha (~33 fps)
+        // Corre na EDT — repaint() é substituído por processamento direto aqui.
+        renderTimer = new Timer(30, e -> {
+            String state = lastWorldState;
+            if (state != null) {
+                parseWorld(state);   // parse rápido, sem I/O
+                repaint();           // agendado na EDT onde já estamos
             }
-        }
+        });
+        renderTimer.start();
+    }
 
-        @Override
-        protected void paintComponent(Graphics g) {
+    // Chamado pelo socket reader thread — apenas guarda o estado, não bloqueia
+    public void updateWorld(String msg) {
+        // last-write-wins: se chegaram 2 estados antes do próximo render,
+        // descartamos o anterior — é aceitável num jogo a 33fps.
+        lastWorldState = msg;
+        // NÃO chamamos repaint() aqui — o renderTimer trata disso
+    }
+
+    // Parse isolado — pode ser chamado sem preocupações de thread safety
+    // porque lastWorldState é volatile e parseWorld não faz I/O nem Swing calls
+    private void parseWorld(String msg) {
+        try {
+            gameObjectsMap.clear();
+            String[] parts = msg.split(",");
+            for (int i = 1; i < parts.length; i++) {
+                String[] data = parts[i].split(":");
+                String category = data[0].trim();
+                if (category.equals("P")) {
+                    String user = data[1].trim();
+                    int score = data.length > 6 ? Integer.parseInt(data[6].trim()) : 0;
+                    gameObjectsMap.put(user, new GameObject(user,
+                        Double.parseDouble(data[2]), Double.parseDouble(data[3]),
+                        Double.parseDouble(data[4]), Double.parseDouble(data[5]), score));
+                } else if (category.equals("O")) {
+                    String id = "OBJ_" + data[1].trim();
+                    gameObjectsMap.put(id, new GameObject(id,
+                        Double.parseDouble(data[2]), Double.parseDouble(data[3]),
+                        Integer.parseInt(data[4]),   Double.parseDouble(data[5])));
+                }
+            }
+        } catch (Exception e) {
+            System.out.println("Erro no parser: " + e.getMessage());
+        }
+    }
+
+    public void stopInput() {
+        if (inputTimer  != null) inputTimer.stop();
+        if (renderTimer != null) renderTimer.stop();  // ← para ambos os timers
+    }
+
+    @Override
+    protected void paintComponent(Graphics g) {
             super.paintComponent(g);
             Graphics2D g2 = (Graphics2D) g;
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
@@ -359,10 +385,31 @@ class MenuPanel extends JPanel {
                     int targetX = (int) (ix + Math.cos(obj.angulo) * radius);
                     int targetY = (int) (iy + Math.sin(obj.angulo) * radius);
                     g2.drawLine(ix, iy, targetX, targetY);
-                
-                    // Nome por cima
-                    g2.setColor(Color.BLACK);
-                    g2.drawString(obj.id, ix - radius, iy - radius - 5);
+
+                    FontMetrics fm = g2.getFontMetrics();
+                    String labelNome  = obj.id;
+                    String labelScore = "⚡ " + obj.score;  // capturas PvP
+
+                    int nomeW  = fm.stringWidth(labelNome);
+                    int scoreW = fm.stringWidth(labelScore);
+
+                    // Fundo semitransparente para legibilidade sobre qualquer cor de fundo
+                    int pad = 3;
+                    int labelX = ix - Math.max(nomeW, scoreW) / 2 - pad;
+                    int labelY = iy - radius - fm.getHeight() * 2 - pad * 2 - 4;
+                    int labelW = Math.max(nomeW, scoreW) + pad * 2;
+                    int labelH = fm.getHeight() * 2 + pad * 2 + 2;
+
+                    g2.setColor(new Color(0, 0, 0, 140));  // preto com 55% opacidade
+                    g2.fillRoundRect(labelX, labelY, labelW, labelH, 6, 6);
+
+                    // Nome (branco)
+                    g2.setColor(Color.WHITE);
+                    g2.drawString(labelNome, ix - nomeW / 2, iy - radius - fm.getHeight() - pad - 2);
+
+                    // Score — amarelo dourado para destaque
+                    g2.setColor(new Color(255, 215, 0));
+                    g2.drawString(labelScore, ix - scoreW / 2, iy - radius - pad);
                 } 
                 else if (obj.type.equals("O")) {
                     // --- DESENHAR OBJETO ---
@@ -376,7 +423,7 @@ class MenuPanel extends JPanel {
                 }
             });
         }
-    }
+}
 
     class RankingPanel extends JPanel {
         JTextArea area = new JTextArea(15, 20);

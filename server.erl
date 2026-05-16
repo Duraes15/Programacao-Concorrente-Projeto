@@ -214,46 +214,48 @@ gerar_objetos_tipo(N, Tipo) ->
     Y = rand:uniform(985) * 1.0,
     [{obj, Id, {X, Y}, Tipo, 10.0 + rand:uniform(20)} | gerar_objetos_tipo(N-1, Tipo)].
 
-processar_capturas_jogadores(Jogadores) ->
+%% Versão que devolve {NovosJogadores, CapturasDelta}
+%% onde CapturasDelta = #{User => NumCapturas neste tick}
+processar_capturas_jogadores_com_score(Jogadores) ->
     Sorted = lists:reverse(lists:keysort(5, Jogadores)),
-    aplicar_capturas(Sorted, []).
+    aplicar_capturas_com_score(Sorted, [], #{}).
 
-aplicar_capturas([], Processados) -> Processados;
-aplicar_capturas([Predador | Resto], Processados) ->
+aplicar_capturas_com_score([], Processados, Delta) ->
+    {Processados, Delta};
+aplicar_capturas_com_score([Predador | Resto], Processados, Delta) ->
     {U1, Pos1, V1, A1, M1, Pid1, Ref1} = Predador,
     Raio1 = math:sqrt(M1 * 20),
-    {NovoResto, GanhoMassa} = engolir_presas(Predador, Raio1, Resto, 0),
+    {NovoResto, GanhoMassa, NumCapturasNesteAtaque} =
+        engolir_presas_com_score(Predador, Raio1, Resto, 0, 0),
     NovoPredador = {U1, Pos1, V1, A1, M1 + GanhoMassa, Pid1, Ref1},
-    aplicar_capturas(NovoResto, [NovoPredador | Processados]).
+    NovoDelta = maps:update_with(U1,
+                    fun(V) -> V + NumCapturasNesteAtaque end,
+                    NumCapturasNesteAtaque, Delta),
+    aplicar_capturas_com_score(NovoResto, [NovoPredador | Processados], NovoDelta).
 
-engolir_presas(_Predador, _Raio1, [], GanhoMassa) -> {[], GanhoMassa};
-engolir_presas(Predador = {U1, Pos1, _, _, _, _, _}, Raio1, [Presa | Resto], GanhoMassa) ->
+engolir_presas_com_score(_P, _R1, [], GM, NC) -> {[], GM, NC};
+engolir_presas_com_score(Predador = {U1, Pos1,_,_,_,_,_}, Raio1,
+                         [Presa | Resto], GanhoMassa, NumCapturas) ->
     {U2, Pos2, _V2, A2, M2, Pid2, Ref2} = Presa,
     Dist = distancia(Pos1, Pos2),
     Raio2 = math:sqrt(M2 * 20),
     if (Raio1 > Raio2) andalso ((Dist + Raio2) =< Raio1) ->
         MassaRoubada = M2 / 4.0,
         NovaMassaPresa = max(?MIN_MASSA, M2 - MassaRoubada),
-        NovaPos2 = {rand:uniform(1905) * 1.0, rand:uniform(985) * 1.0},
+        NovaPos2 = {rand:uniform(1920) * 1.0, rand:uniform(1000) * 1.0},
         NovaPresa = {U2, NovaPos2, {0.0, 0.0}, A2, NovaMassaPresa, Pid2, Ref2},
         io:format(">> PVP: ~s engoliu ~s!~n", [U1, U2]),
-        {FinalResto, FinalGanho} = engolir_presas(Predador, Raio1, Resto, GanhoMassa + MassaRoubada),
-        {[NovaPresa | FinalResto], FinalGanho};
+        %% Incrementa capturas para este predador
+        {FinalResto, FinalGanho, FinalNC} =
+            engolir_presas_com_score(Predador, Raio1, Resto,
+                                     GanhoMassa + MassaRoubada,
+                                     NumCapturas + 1),
+        {[NovaPresa | FinalResto], FinalGanho, FinalNC};
     true ->
-        {FinalResto, FinalGanho} = engolir_presas(Predador, Raio1, Resto, GanhoMassa),
-        {[Presa | FinalResto], FinalGanho}
+        {FinalResto, FinalGanho, FinalNC} =
+            engolir_presas_com_score(Predador, Raio1, Resto, GanhoMassa, NumCapturas),
+        {[Presa | FinalResto], FinalGanho, FinalNC}
     end.
-
-show_rankings(Socket) ->
-    Lista = ets:tab2list(rankings),
-    gen_tcp:send(Socket, <<"RANK_START\n">>), % Avisa o Java para começar a guardar
-    case Lista of
-        [] -> gen_tcp:send(Socket, <<"Ainda nao ha recordes registados.\n">>);
-        _  -> [gen_tcp:send(Socket, [User, <<": ">>, integer_to_binary(Vits), <<" vitorias\n">>]) 
-               || {User, Vits} <- Lista]
-    end,
-    gen_tcp:send(Socket, <<"RANK_END\n">>).
-
 match_maker_loop(Fila, NumPartidasAtivas) ->
     receive
         {entrar_na_fila, Username, Pid} ->
@@ -353,61 +355,75 @@ wait_loop_atento(Socket, User) ->
 %        wait_loop_cont(Socket, User)
 %    end.
 
-% --- ATUALIZAÇÃO: INICIALIZAR JOGO ---
+
 inicializar_jogo(ListaJogadores, MatchMakerPid) ->
-    EstadoInicial = [
-        begin
-            Ref = monitor (process, Pid),
-            {User, {100.0, 100.0 + (I*50.0)}, {0.0, 0.0}, 0.0, 50.0, Pid, Ref}
-        end
-        || {I, {User, Pid, _Ref}} <- lists:zip(lists:seq(1, length(ListaJogadores)), ListaJogadores) ],
+    EstadoInicial =
+        [begin
+             %% Cancela o monitor que o match_maker criou para este Pid
+             demonitor(RefAntigo, [flush]),
+             %% Cria um novo monitor: este Ref pertence apenas ao partida_loop
+             Ref = monitor(process, Pid),
+             {User, {100.0, 100.0 + (I * 50.0)}, {0.0, 0.0}, 0.0, 50.0, Pid, Ref}
+         end
+         || {I, {User, Pid, RefAntigo}}
+                <- lists:zip(lists:seq(1, length(ListaJogadores)),
+                             ListaJogadores)],
 
-    % Criamos 10 objetos no mapa logo no início
     ObjetosIniciais = gerar_objetos(30),
-
     [Pid ! {começar_partida, self()} || {_User, Pid, _Ref} <- ListaJogadores],
-    self() ! tick, 
-    % Passamos os Jogadores e os Objetos separadamente
-    partida_loop(EstadoInicial, ObjetosIniciais, MatchMakerPid).
+    self() ! tick,
+    erlang:send_after(120000, self(), fim_tempo),   %% ← NOVO: 2 minutos
+    partida_loop(EstadoInicial, ObjetosIniciais, MatchMakerPid, #{}).
 
 % --- ATUALIZAÇÃO: PARTIDA LOOP (Agora recebe Objetos) ---
-partida_loop(Jogadores, Objetos, MatchMakerPid) ->
+%% ADICIONADO: 4º argumento Capturas = #{User => N}
+%% ADICIONADO: timer de 2 minutos com erlang:send_after
+%% ADICIONADO: contagem de capturas PvP em processar_capturas_jogadores
+
+partida_loop(Jogadores, Objetos, MatchMakerPid, Capturas) ->
     receive
         {mover, User, Tecla} ->
-            case Tecla of 
+            case Tecla of
                 "ESC" ->
-                    JogadoresSaiu = lists:filter(fun({U, _Pos, _Vel, _Ang, _M, _P, _R}) -> User == U end, Jogadores),
-                    NovosJogadores = lists:filter(fun({U, _Pos, _Vel, _Ang, _M, _P, _R}) -> User =/= U end, Jogadores),
-
+                    JogadoresSaiu = lists:filter(
+                        fun({U,_,_,_,_,_,_}) -> U =:= User end, Jogadores),
+                    NovosJogadores = lists:filter(
+                        fun({U,_,_,_,_,_,_}) -> U =/= User end, Jogadores),
                     broadcast_saiu(JogadoresSaiu),
-
-                    % Agora passamos os Objetos para o check_winner
-                    check_winner(NovosJogadores, Objetos, MatchMakerPid);
-                    
+                    check_winner(NovosJogadores, Objetos, MatchMakerPid, Capturas);
                 _ ->
                     NovoJogador = calcular_fisica(User, Tecla, Jogadores),
                     NovosJogadores = lists:keyreplace(User, 1, Jogadores, NovoJogador),
-                    partida_loop(NovosJogadores, Objetos, MatchMakerPid)
-                end;
+                    partida_loop(NovosJogadores, Objetos, MatchMakerPid, Capturas)
+            end;
 
         tick ->
             JogadoresComInercia = aplicar_movimento_global(Jogadores),
-            
-            {JogadoresAposObjetos, NovosObjetos} = processar_colisoes(JogadoresComInercia, Objetos),
+            {JogadoresAposObjetos, NovosObjetos} =
+                processar_colisoes(JogadoresComInercia, Objetos),
+            %% processar_capturas_jogadores agora devolve {Jogadores, CapturasDelta}
+            {NovosJogadores, CapturasDelta} =
+                processar_capturas_jogadores_com_score(JogadoresAposObjetos),
+            %% Acumula capturas no mapa
+            NovasCapturas = maps:fold(
+                fun(U, N, Acc) -> maps:update_with(U, fun(V) -> V + N end, N, Acc) end,
+                Capturas, CapturasDelta),
+            broadcast_estado(NovosJogadores, NovosObjetos, NovasCapturas),
+            erlang:send_after(20, self(), tick),
+            partida_loop(NovosJogadores, NovosObjetos, MatchMakerPid, NovasCapturas);
 
-            NovosJogadores = processar_capturas_jogadores(JogadoresAposObjetos),
+        %% Timer de fim de partida (2 minutos = 120 000 ms)
+        %% Dispara este após iniciar a partida:
+        %%   erlang:send_after(120000, self(), fim_tempo)
+        fim_tempo ->
+            broadcast_fim(Jogadores),
+            registar_vencedor(Jogadores, Capturas),
+            MatchMakerPid ! {partida_terminou};
 
-            broadcast_estado(NovosJogadores, NovosObjetos),
-            
-            erlang:send_after(30, self(), tick),
-            partida_loop(NovosJogadores, NovosObjetos, MatchMakerPid);
-
-        % Mudei o _Pid para _PidDown para resolver o warning
         {'DOWN', Ref, process, _PidDown, _Reason} ->
-            NovosJogadores = lists:filter(fun({_User, _Pos, _Vel, _Ang, _M, _P, R}) -> R =/= Ref end, Jogadores),
-            
-            % Agora passamos os Objetos para o check_winner
-            check_winner(NovosJogadores, Objetos, MatchMakerPid);
+            NovosJogadores = lists:filter(
+                fun({_,_,_,_,_,_,R}) -> R =/= Ref end, Jogadores),
+            check_winner(NovosJogadores, Objetos, MatchMakerPid, Capturas);
 
         {fim_de_jogo} ->
             MatchMakerPid ! {partida_terminou}
@@ -419,20 +435,71 @@ partida_loop(Jogadores, Objetos, MatchMakerPid) ->
 -define(TORQUE, 0.2).  % era 0.1
 -define(ATRITO, 0.995). % era 0.98 — travava em ~1 segundo
 
-% --- ATUALIZAÇÃO: CHECK WINNER AGORA RECEBE OBJETOS ---
-check_winner(Jogadores, Objetos, MatchMakerPid) ->
+%% PROBLEMA ORIGINAL: check_winner não atualizava rankings.
+%% A tabela ETS estava com {keypos, 2} mas os dados eram {User, Vits}
+%% onde User é o campo 1 — inconsistência que causava lookup errado.
+%%
+%% FIX: Recria a tabela com keypos padrão (1) e usa update_counter.
+
+%% Em start/1, substitui a linha de criação de rankings por:
+%%   ets:new(rankings, [set, public, named_table])
+%% (sem {keypos,2} — a chave é o campo 1 = User, valor = vitórias)
+
+check_winner(Jogadores, Objetos, MatchMakerPid, Capturas) ->
     case length(Jogadores) of
-        1 -> 
-            [Winner] = Jogadores, 
+        0 ->
+            %% Empate ou todos saíram — ignora para rankings (spec)
+            MatchMakerPid ! {partida_terminou};
+        1 ->
+            [Winner] = Jogadores,
             {UserWinner, _, _, _, _, _, _} = Winner,
-            io:format("Vencedor: ~p~n", [UserWinner]),
-
+            io:format("Vencedor por eliminação: ~p~n", [UserWinner]),
             broadcast_fim(Jogadores),
-
+            registar_vencedor(Jogadores, Capturas),
             MatchMakerPid ! {partida_terminou};
         _ ->
-            partida_loop(Jogadores, Objetos, MatchMakerPid)
+            partida_loop(Jogadores, Objetos, MatchMakerPid, Capturas)
     end.
+
+%% Determina o vencedor e escreve na tabela ETS rankings.
+%% Critério: mais capturas PvP. Empate → partida ignorada (spec).
+registar_vencedor(Jogadores, Capturas) ->
+    Users = [U || {U,_,_,_,_,_,_} <- Jogadores],
+    Scores = [{maps:get(U, Capturas, 0), U} || U <- Users],
+    Sorted = lists:reverse(lists:sort(Scores)),
+    case Sorted of
+        [] -> ok;
+        [{TopScore, TopUser} | Rest] ->
+            %% Verifica empate
+            Empate = lists:any(fun({S, _}) -> S =:= TopScore end, Rest),
+            if Empate ->
+                io:format("Empate! Partida ignorada nos rankings.~n");
+               true ->
+                io:format("Vencedor: ~s com ~p capturas~n", [TopUser, TopScore]),
+                %% update_counter é atómico: incrementa ou inicializa
+                case ets:lookup(rankings, TopUser) of
+                    [] -> ets:insert(rankings, {TopUser, 1});
+                    _  -> ets:update_counter(rankings, TopUser, {2, 1})
+                end
+            end
+    end.
+
+%% Versão de show_rankings corrigida (sem {keypos,2}):
+show_rankings(Socket) ->
+    Lista = ets:tab2list(rankings),
+    %% Ordena por vitórias decrescente
+    Sorted = lists:reverse(lists:keysort(2, Lista)),
+    gen_tcp:send(Socket, <<"RANK_START\n">>),
+    case Sorted of
+        [] ->
+            gen_tcp:send(Socket, <<"Ainda nao ha recordes registados.\n">>);
+        _ ->
+            [gen_tcp:send(Socket,
+                [list_to_binary(User), <<": ">>,
+                 integer_to_binary(Vits), <<" vitorias\n">>])
+             || {User, Vits} <- Sorted]
+    end,
+    gen_tcp:send(Socket, <<"RANK_END\n">>).
 
 calcular_fisica(User, Comando, Estado) ->
     {User, {X, Y}, {VX, VY}, Angulo, Massa, Pid, Ref} = lists:keyfind(User, 1, Estado),
@@ -471,10 +538,10 @@ aplicar_movimento_global(Estado) ->
 %sin(A) -> math:sin(A).
 % Envia o estado para o processo de cada jogador
 % --- ATUALIZAÇÃO: BROADCAST ESTADO (Agora envia P: e O:) ---
-broadcast_estado(Jogadores, Objetos) ->
+broadcast_estado(Jogadores, Objetos, Capturas) ->
     MsgJogadores = lists:foldl(fun({U, {X, Y}, _, Ang, M, _Pid, _}, Acc) -> 
-        JogadorData = io_lib:format(",P:~s:~.2f:~.2f:~.2f:~.2f", 
-                                    [U, float(X), float(Y), float(Ang), float(M)]),
+        JogadorData = io_lib:format(",P:~s:~.2f:~.2f:~.2f:~.2f:~.p", 
+                                    [U, float(X), float(Y), float(Ang), float(M),maps:get(U, Capturas, 0)]),
         Acc ++ lists:flatten(JogadorData)
     end, "DATA", Jogadores),
     
