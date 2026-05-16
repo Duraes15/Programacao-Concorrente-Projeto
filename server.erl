@@ -1,6 +1,6 @@
 -module(server).
 -export([start/1, handle_client/1]).
--define(MIN_MASSA, 10.0).
+-define(MIN_MASSA, 12.0).
 
 % Função para calcular a distância entre dois pontos (X1,Y1) e (X2,Y2)
 distancia({X1, Y1}, {X2, Y2}) ->
@@ -10,7 +10,7 @@ start(Gate) ->
     try ets:new(utilizadores, [set, public, named_table])
     catch _:_ -> ok end,
 
-    try ets:new(rankings, [ordered_set, public, named_table, {keypos, 2}])
+    try ets:new(rankings, [set, public, named_table])
     catch _:_ -> ok end,
 
     % NOVO — tabela de sessões ativas
@@ -328,7 +328,10 @@ wait_loop_atento(Socket, User) ->
             case string:trim(binary_to_list(Data)) of
                 "READY" -> 
                     match_maker ! {ready, self()},
-                    gen_tcp:send(Socket, <<"Estado: Estás pronto! A aguardar outros...\n">>),
+                    gen_tcp:send(Socket, <<"Estado: Pronto! A aguardar outros...\n">>),
+                    wait_loop_atento(Socket, User);
+                "2" ->
+                    show_rankings(Socket),
                     wait_loop_atento(Socket, User);
                 _ -> 
                     wait_loop_atento(Socket, User)
@@ -471,24 +474,22 @@ registar_vencedor(Jogadores, Capturas) ->
     case Sorted of
         [] -> ok;
         [{TopScore, TopUser} | Rest] ->
-            %% Verifica empate
             Empate = lists:any(fun({S, _}) -> S =:= TopScore end, Rest),
             if Empate ->
                 io:format("Empate! Partida ignorada nos rankings.~n");
                true ->
-                io:format("Vencedor: ~s com ~p capturas~n", [TopUser, TopScore]),
-                %% update_counter é atómico: incrementa ou inicializa
-                case ets:lookup(rankings, TopUser) of
-                    [] -> ets:insert(rankings, {TopUser, 1});
-                    _  -> ets:update_counter(rankings, TopUser, {2, 1})
-                end
+                NovasVitorias = case ets:lookup(rankings, TopUser) of
+                    []      -> 1;
+                    [H | _] -> element(2, H) + 1
+                end,
+                ets:insert(rankings, {TopUser, NovasVitorias}),
+                io:format("~s agora tem ~p vitorias~n", [TopUser, NovasVitorias])
             end
     end.
 
 %% Versão de show_rankings corrigida (sem {keypos,2}):
 show_rankings(Socket) ->
     Lista = ets:tab2list(rankings),
-    %% Ordena por vitórias decrescente
     Sorted = lists:reverse(lists:keysort(2, Lista)),
     gen_tcp:send(Socket, <<"RANK_START\n">>),
     case Sorted of

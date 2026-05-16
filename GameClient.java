@@ -3,13 +3,10 @@ import java.awt.*;
 import java.awt.event.*;
 import java.io.*;
 import java.net.*;
-import java.util.HashMap; // Adiciona este import
 import java.util.HashSet;
-import java.util.Map;     // Adiciona este import
+import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap; // Adiciona este import
-import java.util.HashSet;
-import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 
 public class GameClient extends JFrame {
@@ -25,10 +22,14 @@ public class GameClient extends JFrame {
     private StringBuilder rankBuffer = new StringBuilder();
     private boolean collectingRankings = false;
 
-    // Substitui a variável playerPositions antiga por esta:
     private Map<String, GameObject> gameObjectsMap = new ConcurrentHashMap<>();
 
-    private String myUsername; 
+    private String myUsername;
+
+    // FIX: estado da fila guardado no GameClient, acessível a todas as classes internas.
+    // Antes era calculado a partir do estado do menuPanel na thread do socket
+    // (race condition). Agora é atualizado diretamente nos action listeners.
+    private boolean estavaNaFila = false;
 
     public GameClient() {
         initGUI();
@@ -38,13 +39,10 @@ public class GameClient extends JFrame {
     private void initGUI() {
         setTitle("Mini-Jogo Concorrente");
         setDefaultCloseOperation(EXIT_ON_CLOSE);
-
         setVisible(true);
         setExtendedState(JFrame.MAXIMIZED_BOTH);
-        
         loginPanel = new LoginPanel();
         getContentPane().add(loginPanel);
-        
         revalidate();
         repaint();
     }
@@ -55,7 +53,6 @@ public class GameClient extends JFrame {
                 socket = new Socket("127.0.0.1", 12345);
                 in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
                 out = new PrintWriter(socket.getOutputStream(), true);
-
                 String line;
                 while ((line = in.readLine()) != null) {
                     processarMensagem(line);
@@ -67,7 +64,6 @@ public class GameClient extends JFrame {
     }
 
     private void processarMensagem(String msg) {
-        // 1. Lógica de Rankings (Captura de buffer)
         if (msg.equals("RANK_START")) {
             collectingRankings = true;
             rankBuffer.setLength(0);
@@ -75,7 +71,10 @@ public class GameClient extends JFrame {
         }
         if (msg.equals("RANK_END")) {
             collectingRankings = false;
-            SwingUtilities.invokeLater(() -> mudarParaRanking(rankBuffer.toString()));
+            // FIX: lê estavaNaFila do campo do GameClient, não do estado do menuPanel.
+            // O campo é atualizado na EDT pelos action listeners — sem race condition.
+            boolean voltarParaFila = estavaNaFila;
+            SwingUtilities.invokeLater(() -> mudarParaRanking(rankBuffer.toString(), voltarParaFila));
             return;
         }
         if (collectingRankings) {
@@ -84,30 +83,20 @@ public class GameClient extends JFrame {
         }
 
         if (msg.contains("Sucesso: Ola")) {
-            // Extrai o nome da mensagem "Sucesso: Ola Nome!"
-            // this.myUsername = msg.replace("Sucesso: Ola ", "").replace("!", "").trim();
-            // Comentei a linha acima, pois a coloquei de maneira diferente no método enviar,
-            // guardei o username logo na função enviar, pois estava dando erro na hora de identificar
-            // os jogadores com a borda azul ou vermelha. Se concordarem com a minha abordagem, acho que 
-            // a linha de código acima não é mais necessária, pois estava causando problemas.
             SwingUtilities.invokeLater(() -> mudarParaMenu());
-        } 
-        else if (msg.contains("A partida vai comecar")) {
+        } else if (msg.contains("A partida vai comecar")) {
+            // Quando a partida começa, o jogador já não está na fila
+            estavaNaFila = false;
             SwingUtilities.invokeLater(() -> mudarParaJogo());
-        }
-        // 3. Atualização do Mundo (Onde a magia acontece)
-        else if (msg.startsWith("DATA") && gamePanel != null) {
+        } else if (msg.startsWith("DATA") && gamePanel != null) {
             gamePanel.updateWorld(msg);
-        }
-        else if (msg.contains("FIM")){
+        } else if (msg.contains("FIM")) {
             if (gamePanel != null) {
-                gamePanel.stopInput(); // Para o timer antes de mudar de ecrã
+                gamePanel.stopInput();
                 gamePanel = null;
             }
             SwingUtilities.invokeLater(() -> mudarParaMenu());
-        }
-        // 4. Mensagens informativas (Fila de espera, erros, etc)
-        else {
+        } else {
             SwingUtilities.invokeLater(() -> {
                 if (menuPanel != null && menuPanel.isShowing()) {
                     menuPanel.setInfo(msg);
@@ -118,9 +107,9 @@ public class GameClient extends JFrame {
         }
     }
 
-    private void mudarParaRanking(String dados) {
+    private void mudarParaRanking(String dados, boolean voltarParaFila) {
         getContentPane().removeAll();
-        rankingPanel = new RankingPanel();
+        rankingPanel = new RankingPanel(voltarParaFila);
         rankingPanel.setTexto(dados);
         add(rankingPanel);
         revalidate();
@@ -128,6 +117,7 @@ public class GameClient extends JFrame {
     }
 
     private void mudarParaMenu() {
+        estavaNaFila = false;
         getContentPane().removeAll();
         menuPanel = new MenuPanel();
         add(menuPanel);
@@ -142,8 +132,9 @@ public class GameClient extends JFrame {
         revalidate();
         repaint();
     }
-    
+
     private void mudarParaLogin() {
+        estavaNaFila = false;
         getContentPane().removeAll();
         loginPanel = new LoginPanel();
         add(loginPanel);
@@ -151,7 +142,23 @@ public class GameClient extends JFrame {
         repaint();
     }
 
-    // --- SUB-ECRÃS (Classes Internas) ---
+    // FIX: extraído para método próprio para ser chamado tanto pelo botão "Voltar"
+    // do RankingPanel (quando estava na fila) como pelo MenuPanel normal.
+    private void mudarParaMenuComFila() {
+        getContentPane().removeAll();
+        menuPanel = new MenuPanel();
+        // Restaura o estado visual — o servidor ainda tem este jogador na fila
+        menuPanel.playBtn.setEnabled(false);
+        menuPanel.readyBtn.setVisible(true);
+        menuPanel.rankBtn.setVisible(true);
+        menuPanel.setInfo("Ainda estás na fila. Clica em 'Estou Pronto' para jogar.");
+        // FIX: add() e revalidate() chamados no GameClient (JFrame), não no JPanel
+        GameClient.this.add(menuPanel);
+        GameClient.this.revalidate();
+        GameClient.this.repaint();
+    }
+
+    // --- SUB-ECRÃS ---
 
     class LoginPanel extends JPanel {
         JTextField userField = new JTextField(10);
@@ -176,21 +183,19 @@ public class GameClient extends JFrame {
         }
 
         private void enviar(String cmd) {
-            // Se o comando for login ou register, guardamos logo o username limpo
             if (cmd.equals("login") || cmd.equals("register")) {
                 GameClient.this.myUsername = userField.getText().trim();
             }
-            
             out.println(cmd + "," + userField.getText() + "," + new String(passField.getPassword()));
         }
 
         public void setStatus(String msg) { statusLabel.setText(msg); }
     }
 
-class MenuPanel extends JPanel {
-        JButton playBtn = new JButton("Procurar Partida");
+    class MenuPanel extends JPanel {
+        JButton playBtn  = new JButton("Procurar Partida");
         JButton readyBtn = new JButton("ESTOU PRONTO");
-        JButton rankBtn = new JButton("Ver Rankings");
+        JButton rankBtn  = new JButton("Ver Rankings");
         JButton logoutBtn = new JButton("Sair/Logout");
         JLabel infoLabel = new JLabel("Escolhe uma opção para continuar.", SwingConstants.CENTER);
 
@@ -200,6 +205,7 @@ class MenuPanel extends JPanel {
             infoLabel.setFont(new Font("Arial", Font.BOLD, 14));
 
             readyBtn.setVisible(false);
+            rankBtn.setVisible(false);
             readyBtn.setBackground(Color.ORANGE);
 
             add(infoLabel);
@@ -210,15 +216,21 @@ class MenuPanel extends JPanel {
 
             playBtn.addActionListener(e -> {
                 out.println("1");
+                // FIX: atualiza o campo do GameClient ao entrar na fila
+                estavaNaFila = true;
                 playBtn.setEnabled(false);
                 readyBtn.setVisible(true);
+                rankBtn.setVisible(true); 
                 infoLabel.setText("Estás na fila. Clica em 'Estou Pronto' para jogar.");
             });
 
             readyBtn.addActionListener(e -> {
                 out.println("READY");
+                // FIX: após enviar READY o jogador já não "volta à fila" se ver rankings
+                estavaNaFila = false;
                 readyBtn.setEnabled(false);
                 readyBtn.setText("AGUARDANDO...");
+                rankBtn.setVisible(false);
             });
 
             rankBtn.addActionListener(e -> {
@@ -231,138 +243,121 @@ class MenuPanel extends JPanel {
                 mudarParaLogin();
             });
         }
-        
+
         public void setInfo(String txt) {
-            String formattedTxt = "<html><body style='text-align:center;'>" + 
-                                  txt.replace("\n", "<br>") + 
+            String formattedTxt = "<html><body style='text-align:center;'>" +
+                                  txt.replace("\n", "<br>") +
                                   "</body></html>";
             infoLabel.setText(formattedTxt);
         }
     }
 
-    // Dentro da classe GameClient, mas fora de outros métodos
     class GameObject {
-        String type; // "P" para Player, "O" para Objeto
-        String id;
+        String type, id;
         double x, y, angulo, massa;
-        int objectType; // 1 para comestível, 2 para venenoso
+        int objectType;
         int score;
 
-        // Construtor para Jogador
         GameObject(String id, double x, double y, double angulo, double massa, int score) {
-            this.type = "P"; this.id = id; this.x = x; this.y = y; this.angulo = angulo; this.massa = massa;this.score = score;
+            this.type = "P"; this.id = id; this.x = x; this.y = y;
+            this.angulo = angulo; this.massa = massa; this.score = score;
         }
-        // Construtor para Objeto
+
         GameObject(String id, double x, double y, int objType, double tam) {
-            this.type = "O"; this.id = id; this.x = x; this.y = y; this.objectType = objType; this.massa = tam;
+            this.type = "O"; this.id = id; this.x = x; this.y = y;
+            this.objectType = objType; this.massa = tam;
         }
     }
 
-    // PROBLEMA: updateWorld chama repaint() que agenda paint na EDT.
-// O socket reader (thread separada) chama updateWorld, mas se a EDT
-// estiver ocupada com paint, a mailbox do socket acumula e cria lag.
-//
-// FIX: Usar volatile + estratégia "last-write-wins" para o estado do mundo.
-// O socket reader apenas escreve o último estado; o timer de render lê-o.
-// Isto desacopla completamente I/O de rendering — nunca bloqueiam um ao outro.
+    class GamePanel extends JPanel {
+        private volatile int tempoRestante = 120;
+        private volatile String lastWorldState = null;
+        private final Set<Integer> keysPressed = new HashSet<>();
+        private Timer inputTimer;
+        private Timer renderTimer;
 
-class GamePanel extends JPanel {
-    // volatile garante visibilidade entre threads sem synchronized
-    private volatile int tempoRestante = 120;
-    private volatile String lastWorldState = null;
-    private final Set<Integer> keysPressed = new HashSet<>();
-    private Timer inputTimer;
-    private Timer renderTimer;  // ← NOVO: timer dedicado ao render
+        public GamePanel() {
+            setFocusable(true);
+            requestFocusInWindow();
 
-    public GamePanel() {
-        setFocusable(true);
-        requestFocusInWindow();
+            addKeyListener(new KeyAdapter() {
+                @Override public void keyPressed(KeyEvent e)  { keysPressed.add(e.getKeyCode()); }
+                @Override public void keyReleased(KeyEvent e) { keysPressed.remove(e.getKeyCode()); }
+            });
 
-        addKeyListener(new KeyAdapter() {
-            @Override public void keyPressed(KeyEvent e)  { keysPressed.add(e.getKeyCode()); }
-            @Override public void keyReleased(KeyEvent e) { keysPressed.remove(e.getKeyCode()); }
-        });
+            inputTimer = new Timer(30, e -> {
+                if (keysPressed.contains(KeyEvent.VK_UP))     out.println("UP");
+                if (keysPressed.contains(KeyEvent.VK_LEFT))   out.println("LEFT");
+                if (keysPressed.contains(KeyEvent.VK_RIGHT))  out.println("RIGHT");
+                if (keysPressed.contains(KeyEvent.VK_ESCAPE)) out.println("ESC");
+            });
+            inputTimer.start();
 
-        // Timer de input: envia comandos ao servidor (~33 fps)
-        inputTimer = new Timer(30, e -> {
-            if (keysPressed.contains(KeyEvent.VK_UP))    out.println("UP");
-            if (keysPressed.contains(KeyEvent.VK_LEFT))  out.println("LEFT");
-            if (keysPressed.contains(KeyEvent.VK_RIGHT)) out.println("RIGHT");
-            if (keysPressed.contains(KeyEvent.VK_ESCAPE)) out.println("ESC");
-        });
-        inputTimer.start();
-
-        // Timer de render: lê o último estado e redesenha (~33 fps)
-        // Corre na EDT — repaint() é substituído por processamento direto aqui.
-        renderTimer = new Timer(30, e -> {
-            String state = lastWorldState;
-            if (state != null) {
-                parseWorld(state);   // parse rápido, sem I/O
-                repaint();           // agendado na EDT onde já estamos
-            }
-        });
-        renderTimer.start();
-    }
-
-    // Chamado pelo socket reader thread — apenas guarda o estado, não bloqueia
-    public void updateWorld(String msg) {
-        // last-write-wins: se chegaram 2 estados antes do próximo render,
-        // descartamos o anterior — é aceitável num jogo a 33fps.
-        lastWorldState = msg;
-        // NÃO chamamos repaint() aqui — o renderTimer trata disso
-    }
-
-    // Parse isolado — pode ser chamado sem preocupações de thread safety
-    // porque lastWorldState é volatile e parseWorld não faz I/O nem Swing calls
-    private void parseWorld(String msg) {
-        try {
-            gameObjectsMap.clear();
-            String[] parts = msg.split(",");
-            for (int i = 1; i < parts.length; i++) {
-                String[] data = parts[i].split(":");
-                String category = data[0].trim();
-                if (category.equals("P")) {
-                    String user = data[1].trim();
-                    int score = data.length > 6 ? Integer.parseInt(data[6].trim()) : 0;
-                    gameObjectsMap.put(user, new GameObject(user,
-                        Double.parseDouble(data[2]), Double.parseDouble(data[3]),
-                        Double.parseDouble(data[4]), Double.parseDouble(data[5]), score));
-                } else if (category.equals("O")) {
-                    String id = "OBJ_" + data[1].trim();
-                    gameObjectsMap.put(id, new GameObject(id,
-                        Double.parseDouble(data[2]), Double.parseDouble(data[3]),
-                        Integer.parseInt(data[4]),   Double.parseDouble(data[5])));
-                }else if (category.equals("T")) {
-                    tempoRestante = Integer.parseInt(data[1].trim());
+            renderTimer = new Timer(30, e -> {
+                String state = lastWorldState;
+                if (state != null) {
+                    parseWorld(state);
+                    repaint();
                 }
-            }
-        } catch (Exception e) {
-            System.out.println("Erro no parser: " + e.getMessage());
+            });
+            renderTimer.start();
         }
-    }
 
-    public void stopInput() {
-        if (inputTimer  != null) inputTimer.stop();
-        if (renderTimer != null) renderTimer.stop();  // ← para ambos os timers
-    }
+        public void updateWorld(String msg) {
+            lastWorldState = msg;
+        }
 
-    @Override
-    protected void paintComponent(Graphics g) {
+        private void parseWorld(String msg) {
+            try {
+                gameObjectsMap.clear();
+                String[] parts = msg.split(",");
+                for (int i = 1; i < parts.length; i++) {
+                    String[] data = parts[i].split(":");
+                    String category = data[0].trim();
+                    if (category.equals("P")) {
+                        String user = data[1].trim();
+                        int score = data.length > 6 ? Integer.parseInt(data[6].trim()) : 0;
+                        gameObjectsMap.put(user, new GameObject(user,
+                            Double.parseDouble(data[2]),
+                            Double.parseDouble(data[3]),
+                            Double.parseDouble(data[4]),
+                            Double.parseDouble(data[5]),
+                            score));
+                    } else if (category.equals("O")) {
+                        String id = "OBJ_" + data[1].trim();
+                        gameObjectsMap.put(id, new GameObject(id,
+                            Double.parseDouble(data[2]),
+                            Double.parseDouble(data[3]),
+                            Integer.parseInt(data[4]),
+                            Double.parseDouble(data[5])));
+                    } else if (category.equals("T")) {
+                        tempoRestante = Integer.parseInt(data[1].trim());
+                    }
+                }
+            } catch (Exception e) {
+                System.out.println("Erro no parser: " + e.getMessage());
+            }
+        }
+
+        public void stopInput() {
+            if (inputTimer  != null) inputTimer.stop();
+            if (renderTimer != null) renderTimer.stop();
+        }
+
+        @Override
+        protected void paintComponent(Graphics g) {
             super.paintComponent(g);
             Graphics2D g2 = (Graphics2D) g;
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            
-            // Fundo "fora" do mapa (para quando a janela for esticada)
+
             g2.setColor(Color.LIGHT_GRAY);
             g2.fillRect(0, 0, getWidth(), getHeight());
 
-            // Fundo da área jogável fixa (1920 x 1080)
             g2.setColor(Color.WHITE);
             g2.fillRect(0, 0, 1920, 1080);
 
-            // Limites do espaço jogável
             g2.setColor(Color.DARK_GRAY);
-            g2.setStroke(new BasicStroke(5)); 
+            g2.setStroke(new BasicStroke(5));
             g2.drawRect(0, 0, 1905, 985);
 
             gameObjectsMap.values().forEach(obj -> {
@@ -370,62 +365,52 @@ class GamePanel extends JPanel {
                 int iy = (int) obj.y;
 
                 if (obj.type.equals("P")) {
-                    // --- DESENHAR JOGADOR ---
-                    int radius = (int) Math.sqrt(obj.massa * 20); 
-                    g2.setStroke(new BasicStroke(3)); 
-                
-                    // Cor da Borda (Azul para próprio, Vermelho para outros)
+                    int radius = (int) Math.sqrt(obj.massa * 20);
+                    g2.setStroke(new BasicStroke(3));
+
                     if (myUsername != null && obj.id.equals(myUsername)) g2.setColor(Color.BLUE);
                     else g2.setColor(Color.RED);
                     g2.drawOval(ix - radius, iy - radius, radius * 2, radius * 2);
-                
-                    // Interior Preto
+
                     g2.setColor(Color.BLACK);
                     g2.fillOval(ix - radius, iy - radius, radius * 2, radius * 2);
-                
-                    // Linha de Direção Branca
+
                     g2.setColor(Color.WHITE);
-                    int targetX = (int) (ix + Math.cos(obj.angulo) * radius);
-                    int targetY = (int) (iy + Math.sin(obj.angulo) * radius);
+                    int targetX = (int)(ix + Math.cos(obj.angulo) * radius);
+                    int targetY = (int)(iy + Math.sin(obj.angulo) * radius);
                     g2.drawLine(ix, iy, targetX, targetY);
 
                     FontMetrics fm = g2.getFontMetrics();
                     String labelNome  = obj.id;
-                    String labelScore = "⚡ " + obj.score;  // capturas PvP
+                    String labelScore = "⚡ " + obj.score;
 
                     int nomeW  = fm.stringWidth(labelNome);
                     int scoreW = fm.stringWidth(labelScore);
 
-                    // Fundo semitransparente para legibilidade sobre qualquer cor de fundo
-                    int pad = 3;
+                    int pad    = 3;
                     int labelX = ix - Math.max(nomeW, scoreW) / 2 - pad;
                     int labelY = iy - radius - fm.getHeight() * 2 - pad * 2 - 4;
                     int labelW = Math.max(nomeW, scoreW) + pad * 2;
                     int labelH = fm.getHeight() * 2 + pad * 2 + 2;
 
-                    g2.setColor(new Color(0, 0, 0, 140));  // preto com 55% opacidade
+                    g2.setColor(new Color(0, 0, 0, 140));
                     g2.fillRoundRect(labelX, labelY, labelW, labelH, 6, 6);
 
-                    // Nome (branco)
                     g2.setColor(Color.WHITE);
                     g2.drawString(labelNome, ix - nomeW / 2, iy - radius - fm.getHeight() - pad - 2);
 
-                    // Score — amarelo dourado para destaque
                     g2.setColor(new Color(255, 215, 0));
                     g2.drawString(labelScore, ix - scoreW / 2, iy - radius - pad);
-                } 
-                else if (obj.type.equals("O")) {
-                    // DESENHAR OBJETO
-                    int radius = (int) obj.massa; 
-                    
-                    // Verde para comestível (1), Vermelho para venenoso (2)
+
+                } else if (obj.type.equals("O")) {
+                    int radius = (int) obj.massa;
                     if (obj.objectType == 1) g2.setColor(Color.GREEN);
                     else g2.setColor(Color.RED);
-                    
                     g2.fillOval(ix - radius, iy - radius, radius * 2, radius * 2);
                 }
             });
-            // ── Timer ──────────────────────────────────────────────
+
+            // Timer
             int mins = tempoRestante / 60;
             int segs = tempoRestante % 60;
             String timerStr = String.format("%d:%02d", mins, segs);
@@ -435,37 +420,135 @@ class GamePanel extends JPanel {
             FontMetrics fm = g2.getFontMetrics();
             int timerW = fm.stringWidth(timerStr);
 
-            // Fundo semitransparente centrado no topo
-            int tx = 960 - timerW / 2 - 10;  // centrado no mapa de 1920px
+            int tx = 960 - timerW / 2 - 10;
             g2.setColor(new Color(0, 0, 0, 160));
             g2.fillRoundRect(tx, 12, timerW + 20, fm.getHeight() + 10, 10, 10);
 
-            g2.setColor(Color.WHITE);
+            // Vermelho nos últimos 30 segundos
+            g2.setColor(tempoRestante <= 30 ? new Color(255, 80, 80) : Color.WHITE);
             g2.drawString(timerStr, tx + 10, 12 + fm.getAscent() + 5);
 
-            // Repõe a font padrão para não afetar o resto do desenho
             g2.setFont(getFont());
         }
-}
+    }
 
     class RankingPanel extends JPanel {
-        JTextArea area = new JTextArea(15, 20);
-        JButton backBtn = new JButton("Voltar ao Menu");
+    JButton backBtn = new JButton("Voltar ao menu");
+    private Font spaceGrotesk;
 
-        public RankingPanel() {
-            setLayout(new BorderLayout());
-            area.setEditable(false);
-            area.setFont(new Font("Monospaced", Font.BOLD, 14));
-            
-            add(new JLabel("--- TOP PONTUAÇÕES ---", SwingConstants.CENTER), BorderLayout.NORTH);
-            add(new JScrollPane(area), BorderLayout.CENTER);
-            add(backBtn, BorderLayout.SOUTH);
+    public RankingPanel(boolean voltarParaFila) {
+        setLayout(new BorderLayout(0, 0));
+        setBorder(BorderFactory.createEmptyBorder(32, 40, 24, 40));
 
-            backBtn.addActionListener(e -> mudarParaMenu());
+        // Carrega a fonte — faz download uma vez e guarda em /fonts/SpaceGrotesk.ttf
+        // ou usa Arial como fallback se não estiver disponível
+        try {
+            spaceGrotesk = Font.createFont(Font.TRUETYPE_FONT,
+                new java.io.File("fonts/SpaceGrotesk-Regular.ttf")).deriveFont(14f);
+            GraphicsEnvironment.getLocalGraphicsEnvironment().registerFont(spaceGrotesk);
+        } catch (Exception e) {
+            spaceGrotesk = new Font("Arial", Font.PLAIN, 14);
         }
 
-        public void setTexto(String txt) { area.setText(txt); }
+        // Cabeçalho
+        JPanel header = new JPanel();
+        header.setLayout(new BoxLayout(header, BoxLayout.Y_AXIS));
+        header.setOpaque(false);
+        header.setBorder(BorderFactory.createEmptyBorder(0, 0, 20, 0));
+
+        JLabel titulo = new JLabel("Rankings", SwingConstants.CENTER);
+        titulo.setFont(spaceGrotesk.deriveFont(Font.BOLD, 22f));
+        titulo.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        JLabel sub = new JLabel("vitórias desde que o servidor arrancou", SwingConstants.CENTER);
+        sub.setFont(spaceGrotesk.deriveFont(13f));
+        sub.setForeground(new Color(130, 130, 120));
+        sub.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+        header.add(titulo);
+        header.add(Box.createVerticalStrut(4));
+        header.add(sub);
+
+        // Lista
+        JPanel lista = new JPanel();
+        lista.setLayout(new BoxLayout(lista, BoxLayout.Y_AXIS));
+        lista.setOpaque(false);
+
+        // Botão
+        backBtn.setFont(spaceGrotesk.deriveFont(Font.PLAIN, 14f));
+        backBtn.setBackground(null);
+        backBtn.setOpaque(false);
+        backBtn.setCursor(new Cursor(Cursor.HAND_CURSOR));
+        backBtn.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(new Color(200, 200, 190), 1, true),
+            BorderFactory.createEmptyBorder(10, 20, 10, 20)));
+
+        add(header, BorderLayout.NORTH);
+        add(lista,  BorderLayout.CENTER);
+        add(backBtn, BorderLayout.SOUTH);
+
+        backBtn.addActionListener(e -> {
+            if (voltarParaFila) mudarParaMenuComFila();
+            else mudarParaMenu();
+        });
     }
+
+    public void setTexto(String txt) {
+        JPanel lista = (JPanel) ((BorderLayout) getLayout())
+                                 .getLayoutComponent(BorderLayout.CENTER);
+        lista.removeAll();
+
+        if (txt.isBlank() || txt.contains("Ainda nao")) {
+            JLabel vazio = new JLabel("Sem recordes ainda.", SwingConstants.CENTER);
+            vazio.setFont(spaceGrotesk.deriveFont(14f));
+            vazio.setForeground(new Color(160, 160, 150));
+            vazio.setAlignmentX(Component.CENTER_ALIGNMENT);
+            lista.add(Box.createVerticalStrut(30));
+            lista.add(vazio);
+        } else {
+            String[] linhas = txt.strip().split("\n");
+            for (int i = 0; i < linhas.length; i++) {
+                String linha = linhas[i].trim();
+                if (linha.isEmpty()) continue;
+                lista.add(criarEntrada(linha, i + 1));
+            }
+        }
+
+        lista.revalidate();
+        lista.repaint();
+    }
+
+    private JPanel criarEntrada(String linha, int pos) {
+        // Formato: "username: N vitorias"
+        String[] partes = linha.split(":");
+        String nome    = partes.length > 0 ? partes[0].trim() : linha;
+        String vitorias = partes.length > 1 ? partes[1].trim() : "";
+
+        JPanel row = new JPanel(new BorderLayout(12, 0));
+        row.setOpaque(false);
+        row.setBorder(BorderFactory.createMatteBorder(
+            0, 0, 1, 0, new Color(220, 218, 210)));  // linha divisória em baixo
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 44));
+        row.setPreferredSize(new Dimension(0, 44));
+
+        JLabel posLabel = new JLabel(String.valueOf(pos), SwingConstants.RIGHT);
+        posLabel.setFont(spaceGrotesk.deriveFont(13f));
+        posLabel.setForeground(new Color(160, 160, 150));
+        posLabel.setPreferredSize(new Dimension(20, 20));
+
+        JLabel nomeLabel = new JLabel(nome);
+        nomeLabel.setFont(spaceGrotesk.deriveFont(Font.BOLD, 15f));
+
+        JLabel vitsLabel = new JLabel(vitorias);
+        vitsLabel.setFont(spaceGrotesk.deriveFont(13f));
+        vitsLabel.setForeground(new Color(130, 130, 120));
+
+        row.add(posLabel,  BorderLayout.WEST);
+        row.add(nomeLabel, BorderLayout.CENTER);
+        row.add(vitsLabel, BorderLayout.EAST);
+        return row;
+    }
+}
 
     public static void main(String[] args) {
         SwingUtilities.invokeLater(() -> new GameClient());
